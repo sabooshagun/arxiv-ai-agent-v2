@@ -693,20 +693,20 @@ def summarize_paper_plain_english(paper: Paper, llm_config: LLMConfig) -> str:
 
 def main():
     st.set_page_config(
-        page_title="Arxiv.org Agent",
+        page_title="Research Agent",
         layout="wide",
     )
 
-    st.title("📚 Arxiv.org Agent")
+    st.title("🔎 Research Agent")
 
     top_col1, top_col2 = st.columns([3, 1])
     with top_col1:
         st.write(
-            "An LLM powered research assistant that finds, ranks, and explains recent AI papers on arxiv.org."
+            "A research assistant for recent AI papers on arxiv.org, powered by LLMs with both OpenAI and free hosted modes."
         )
     with top_col2:
         st.link_button(
-            "▶ Watch a short demo",
+            "▶ Watch the original demo",
             "https://youtu.be/PqJiYTvOP1M"
         )
 
@@ -726,11 +726,14 @@ It fetches up to about 5000 papers from arxiv.org in the Artificial Intelligence
 
 #### The agent judges how relevant each paper is
 
-In targeted mode an LLM or a simple heuristic reads each candidate and labels it as:
+In targeted mode the agent labels each candidate as:
 
 - primary: the main contribution directly matches your brief  
 - secondary: your topic is only a minor part or example  
 - off topic: not really about your brief  
+
+In OpenAI mode, this is done with an LLM reading your brief and each abstract.  
+In free hosted mode, this is done with a simple heuristic based on embedding similarity and ranking.
 
 In global mode all candidates are treated as primary and this step is skipped.
 
@@ -744,11 +747,22 @@ The agent builds a set of papers to send to the citation prediction step:
 
 #### The agent predicts 1 year citation counts
 
-For each paper in the prediction set, an LLM estimates how many citations it might receive one year after publication, based on factors like topic trendiness, novelty, depth, and potential audience size. These predictions are heuristic impact signals and are best used for ranking within this batch, not as ground truth.
+For each paper in the prediction set, the agent estimates how many citations it might receive one year after publication.
+
+- In OpenAI mode, this uses an LLM prompt that reads each abstract and returns predicted citation counts and short explanations.  
+- In free hosted mode, it uses the same interface where possible and falls back to a score based heuristic that maps relevance scores to a citation range if the LLM output is not usable.
+
+These predictions are heuristic impact signals and are best used for ranking within this batch, not as ground truth.
 
 #### The agent ranks, summarizes, and saves results
 
-The agent ranks papers by predicted citation count, always showing primary papers first, then secondary ones. For the top N that you choose, it shows a plain English summary (OpenAI mode only), relevance explanation, and links to arXiv and the PDF. All intermediate artifacts and a markdown report are saved in a project folder under ~/arxiv_ai_digest_projects/project_<timestamp>, and you can download everything as a ZIP.
+The agent ranks papers by predicted citation count, always showing primary papers first, then secondary ones. For the top N that you choose, it shows:
+
+- Paper metadata, links, and abstract  
+- In OpenAI mode, a plain English summary and explanation of why it matches your brief  
+- In both modes, a ranked table and a markdown report
+
+All intermediate artifacts and a markdown report are saved in a project folder under `~/arxiv_ai_digest_projects/project_<timestamp>`, and you can download everything as a ZIP.
     """)
 
     # Sidebar
@@ -847,8 +861,16 @@ The agent ranks papers by predicted citation count, always showing primary paper
             api_base = os.getenv("FREE_LLM_API_BASE", "http://localhost:8000")
             model_name = os.getenv("FREE_LLM_MODEL_NAME", "phi-2")
 
-        embedding_model_name = "text-embedding-3-large"  # logical name
-        st.caption(f"Embedding model (logical name): `{embedding_model_name}`")
+        # Logical embedding model name
+        embedding_model_name = "text-embedding-3-large"
+
+        if provider == "openai":
+            st.caption("Embedding model (OpenAI): `text-embedding-3-large`")
+        else:
+            st.caption(
+                "Embedding model: decided by the hosted backend "
+                "(for example a SentenceTransformers or BGE model)."
+            )
 
         run_clicked = st.button("🚀 Run Pipeline")
 
@@ -1244,13 +1266,13 @@ The agent ranks papers by predicted citation count, always showing primary paper
     st.subheader("6. Predict Citations with LLM")
 
     st.markdown("""
-For each selected paper, Arxiv.org Agent sends the title, authors, and abstract to the LLM and asks it to estimate how many citations the paper might receive one year after publication. The model bases its estimate on signals such as how trendy the topic is, how novel and substantial the abstract sounds, how broad the potential audience is, and whether the work appears to come from strong labs or well known authors.
+For each selected paper, Research Agent sends the title, authors, and abstract to the model and asks it to estimate how many citations the paper might receive one year after publication. The model bases its estimate on signals such as how trendy the topic is, how novel and substantial the abstract sounds, how broad the potential audience is, and whether the work appears to come from strong labs or well known authors.
 
 The predicted citation counts are heuristic impact signals, not precise forecasts. They are best used for ranking and prioritization within this batch of papers, not as ground truth. The model may reflect existing academic biases, for example favoring well known authors, large labs, English language venues, or hot topics. These scores should never be used on their own for hiring, promotion, funding, or other formal evaluation decisions.
     """)
 
     if run_clicked or "ranked_papers" not in st.session_state:
-        with st.spinner("Calling LLM to predict citations for selected papers..."):
+        with st.spinner("Calling model to predict citations for selected papers..."):
             papers_with_pred = predict_citations_direct(
                 target_papers=selected_papers,
                 llm_config=llm_config,
@@ -1260,7 +1282,7 @@ The predicted citation counts are heuristic impact signals, not precise forecast
             p for p in papers_with_pred if p.predicted_citations is not None
         ]
         if not papers_with_pred:
-            st.error("LLM did not return predictions for any selected papers, and heuristic fallback also failed.")
+            st.error("The model did not return predictions for any selected papers, and heuristic fallback also failed.")
             return
 
         primary_pred = [p for p in papers_with_pred if p.focus_label == "primary"]
@@ -1449,7 +1471,7 @@ The predicted citation counts are heuristic impact signals, not precise forecast
     st.download_button(
         "⬇️ Download all results as ZIP",
         data=zip_bytes,
-        file_name=f"arxiv_agent_{timestamp}.zip",
+        file_name=f"research_agent_{timestamp}.zip",
         mime="application/zip",
     )
 
