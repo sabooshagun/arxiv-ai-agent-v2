@@ -57,7 +57,7 @@ class Paper:
     submitted_date: datetime
     pdf_url: str
     arxiv_url: str
-    predicted_citations: Optional[float] = None
+    predicted_citations: Optional[float] = None  # internal: holds the citation impact score
     prediction_explanations: Optional[List[str]] = None
     semantic_relevance: Optional[float] = None
     semantic_reason: Optional[str] = None
@@ -556,7 +556,7 @@ def heuristic_classify_papers_free(candidates: List[Paper]) -> List[Paper]:
 
 
 # =========================
-# Direct citation prediction helpers (OpenAI) + heuristic citations (free)
+# Direct citation scoring helpers (OpenAI) + heuristic citations (free)
 # =========================
 
 def build_direct_prediction_prompt(target_papers: List[Paper]) -> str:
@@ -575,22 +575,23 @@ def build_direct_prediction_prompt(target_papers: List[Paper]) -> str:
     You are an expert in computer science and scientometrics.
 
     Below are recently published computer science papers.
-    For each paper, estimate how many citations it will receive one year after publication.
+    For each paper, assign a 1 year citation impact score.
 
-    Base your estimate on:
+    This score should loosely correspond to how many citations the paper might
+    receive in one year, but it is primarily a relative impact signal:
+      - Higher scores indicate papers that are more likely to be widely read and cited.
+      - The ranking across papers matters more than the exact value.
+
+    Base your score on:
       - Topic popularity and trendiness
       - Novelty and depth of the abstract
       - Breadth of potential audience and applicability
       - Any hints of strong affiliations or well known authors
 
-    Treat these as relative impact signals, not exact forecasts:
-      - Higher numbers indicate papers that are more likely to be widely read and cited.
-      - The ranking across papers matters more than the absolute counts.
-
     Return a JSON array. Each element must be:
       {
         "title": "<exact title of the paper>",
-        "predicted_citations": <integer number of citations after 1 year>,
+        "predicted_citations": <integer citation impact score>,
         "explanations": [
           "<short explanation 1>",
           "<short explanation 2>",
@@ -623,7 +624,7 @@ def predict_citations_direct(
         parsed = safe_parse_json_array(llm_output)
         if parsed is None:
             st.error(
-                "Failed to parse LLM output as JSON for one prediction batch. "
+                "Failed to parse LLM output as JSON for one citation scoring batch. "
                 "Showing a raw snippet below for debugging."
             )
             st.code(llm_output[:1000])
@@ -637,6 +638,7 @@ def predict_citations_direct(
             if not p:
                 continue
             try:
+                # This field now represents a citation impact score, not a literal forecast
                 p.predicted_citations = float(item.get("predicted_citations", 0))
             except Exception:
                 p.predicted_citations = 0.0
@@ -666,7 +668,8 @@ def assign_heuristic_citations_free(papers: List[Paper]) -> List[Paper]:
             norm = (s - min_s) / (max_s - min_s)
         else:
             norm = 0.5
-        p.predicted_citations = float(int(10 + norm * 40))  # Rough 10–50 range
+        # Rough 10–50 range as a citation impact score
+        p.predicted_citations = float(int(10 + norm * 40))
 
     return papers
 
@@ -742,20 +745,20 @@ It fetches up to about 5000 papers from arxiv.org in the Artificial Intelligence
 - In **OpenAI mode**, an LLM reads each candidate and labels it as primary, secondary, or off topic.  
 - In **free local mode**, a simple heuristic uses the embedding similarity to mark the most relevant papers as primary and the rest as secondary.
 
-#### The agent builds a prediction set
+#### The agent builds a citation scoring set
 
-The agent builds a set of papers to send to the citation prediction step:
+The agent builds a set of papers to send to the citation scoring step:
 
 - It keeps all **primary** papers.  
 - If there are fewer than about 20, it tops up with the strongest **secondary** papers until it reaches roughly 20, when possible.  
 - In global mode, all candidates are used.
 
-#### The agent predicts 1-year citation impact
+#### The agent assigns 1 year citation impact scores
 
-- In **OpenAI mode**, an LLM estimates how many citations each paper might receive one year after publication and provides short explanations.  
-- In **free local mode**, the agent derives a citation score from the relevance signals and uses that to rank papers.
+- In **OpenAI mode**, an LLM reads each paper and assigns a 1 year citation impact score that loosely corresponds to how likely the paper is to be widely read and cited, and provides short explanations.  
+- In **free local mode**, the agent derives a citation impact score from the relevance signals and uses that to rank papers.
 
-These scores are heuristic impact signals and are best used for ranking within this batch, not as ground truth.
+These scores are heuristic impact signals and are best used for ranking within this batch, not as ground truth or as precise forecasts.
 
 #### The agent ranks, summarizes, and saves results
 
@@ -833,7 +836,7 @@ The agent ranks papers, always showing **primary** papers first, then secondary 
                 "Custom",
             ]
             model_choice = st.selectbox(
-                "OpenAI Chat model (for classification & citation prediction)",
+                "OpenAI Chat model (for classification & citation scoring)",
                 openai_models,
                 index=0,
             )
@@ -854,7 +857,8 @@ The agent ranks papers, always showing **primary** papers first, then secondary 
             embedding_model_name = "sentence-transformers/all-MiniLM-L6-v2"
             st.caption(
                 f"Embeddings (local): `{embedding_model_name}`.\n"
-                "Classification and citation ranking use simple heuristics. No API key or external calls."
+                "Classification and citation scoring use simple heuristics based on embedding similarity. "
+                "No API key or external calls."
             )
 
         run_clicked = st.button("🚀 Run Pipeline")
@@ -1087,7 +1091,7 @@ The agent ranks papers, always showing **primary** papers first, then secondary 
         [asdict(p) for p in candidates],
     )
 
-    # 5. Build prediction set with minimum size
+    # 5. Build citation scoring set with minimum size
     st.subheader("5. Automatically Selected Papers for Citation Scoring")
 
     if mode == "global":
@@ -1115,7 +1119,7 @@ The agent ranks papers, always showing **primary** papers first, then secondary 
         if primary_papers:
             if len(primary_papers) >= MIN_FOR_PREDICTION:
                 used_papers = primary_papers.copy()
-                used_label = "All PRIMARY papers (enough for prediction set)"
+                used_label = "All PRIMARY papers (enough for citation scoring set)"
                 st.success(
                     f"{len(primary_papers)} papers classified as PRIMARY. "
                     f"Using all of them for citation scoring (≥ {MIN_FOR_PREDICTION})."
@@ -1142,7 +1146,7 @@ The agent ranks papers, always showing **primary** papers first, then secondary 
                         st.info(
                             f"{len(primary_papers)} papers classified as PRIMARY. "
                             f"Only {len(secondary_papers)} SECONDARY papers available, so you have "
-                            f"{total} papers in the prediction set (below the target of {MIN_FOR_PREDICTION})."
+                            f"{total} papers in the scoring set (below the target of {MIN_FOR_PREDICTION})."
                         )
                 else:
                     used_label = "All PRIMARY papers (no SECONDARY available)"
@@ -1182,8 +1186,8 @@ The agent ranks papers, always showing **primary** papers first, then secondary 
         "These are the papers that the pipeline will use for citation scoring. "
         "Selection is automatic based on mode, embeddings (in targeted modes), and relevance classification."
     )
-    st.write(f"**Prediction set description:** {used_label}")
-    st.write(f"**Number of papers in prediction set:** {len(used_papers)}")
+    st.write(f"**Citation scoring set description:** {used_label}")
+    st.write(f"**Number of papers in citation scoring set:** {len(used_papers)}")
 
     for p in used_papers:
         with st.expander(p.title, expanded=False):
@@ -1208,42 +1212,42 @@ The agent ranks papers, always showing **primary** papers first, then secondary 
         [asdict(p) for p in selected_papers],
     )
 
-    # 6. Predict citations
-    st.subheader("6. Citation Prediction")
+    # 6. Citation scoring
+    st.subheader("6. Citation Scoring")
 
     if provider == "openai":
         st.markdown("""
 **How this step works (OpenAI mode)**
 
-For each selected paper, the agent sends the title, authors, and abstract to an OpenAI model and asks it to estimate how many citations the paper might receive one year after publication. The model bases its estimate on signals such as how trendy the topic is, how novel and substantial the abstract sounds, how broad the potential audience is, and whether the work appears to come from strong labs or well known authors.
+For each selected paper, the agent sends the title, authors, and abstract to an OpenAI model and asks it to assign a 1 year citation impact score. The model bases this score on signals such as how trendy the topic is, how novel and substantial the abstract sounds, how broad the potential audience is, and whether the work appears to come from strong labs or well known authors.
 
-These predicted citation counts are heuristic impact signals and are best used for ranking and prioritization within this batch of papers, not as ground truth. They may reflect existing academic biases.
+These citation impact scores are heuristic signals and are best used for ranking and prioritizing within this batch of papers, not as ground truth or precise forecasts. They may reflect existing academic biases.
         """)
     else:
         st.markdown("""
 **How this step works (free local mode)**
 
-In free local mode, the agent does not call any external LLM. Instead, it combines the embedding based similarity and relevance scores into a single numeric score and uses that score as a proxy for 1 year citation impact. The absolute numbers are less important than the ranking.
+In free local mode, the agent does not call any external LLM. Instead, it combines the embedding based similarity and relevance scores into a single numeric citation impact score and uses that score as a proxy for 1 year citation influence. The absolute numbers are less important than the ranking.
 
 These scores are heuristic and should be used as a guide for exploration rather than as formal evaluation metrics.
         """)
 
     if run_clicked or "ranked_papers" not in st.session_state:
         if provider == "openai":
-            with st.spinner("Calling OpenAI to predict citations for selected papers..."):
+            with st.spinner("Calling OpenAI to assign citation impact scores for selected papers..."):
                 papers_with_pred = predict_citations_direct(
                     target_papers=selected_papers,
                     llm_config=llm_config,
                 )
         else:
-            with st.spinner("Computing heuristic citation scores from relevance signals..."):
+            with st.spinner("Computing heuristic citation impact scores from relevance signals..."):
                 papers_with_pred = assign_heuristic_citations_free(selected_papers)
 
         papers_with_pred = [
             p for p in papers_with_pred if p.predicted_citations is not None
         ]
         if not papers_with_pred:
-            st.error("Citation prediction did not produce any predictions.")
+            st.error("Citation scoring did not produce any scores.")
             return
 
         primary_pred = [p for p in papers_with_pred if p.focus_label == "primary"]
@@ -1274,11 +1278,14 @@ These scores are heuristic and should be used as a guide for exploration rather 
     )
 
     # 7. All selected papers ranked
-    st.subheader("7. All Selected Papers (Ranked by Citation Score)")
+    st.subheader("7. All Selected Papers (Ranked by Citation Impact Score)")
 
-    st.caption("Primary papers appear first, ranked by predicted citations or heuristic scores, followed by secondary papers.")
+    st.caption(
+        "Primary papers appear first, ranked by citation impact score, followed by secondary papers. "
+        "OpenAI mode uses an LLM to assign scores; free mode uses heuristic scores from relevance signals."
+    )
 
-    header = "| Rank | Citation score (1y) | Focus label | Relevance score | Embedding similarity | Title |\n"
+    header = "| Rank | Citation impact score (1y) | Focus label | Relevance score | Embedding similarity | Title |\n"
     sep = "|---:|---:|---|---:|---:|---|\n"
     rows_md = []
     for rank, p in enumerate(ranked_papers, start=1):
@@ -1303,7 +1310,7 @@ These scores are heuristic and should be used as a guide for exploration rather 
 
     for rank, p in enumerate(topN, start=1):
         st.markdown(f"### #{rank}: {p.title}")
-        st.write(f"**Citation score (1 year):** {int(p.predicted_citations or 0)}")
+        st.write(f"**Citation impact score (1 year):** {int(p.predicted_citations or 0)}")
         st.write(f"**Authors:** {', '.join(p.authors) if p.authors else 'Unknown'}")
         st.write(f"[arXiv link]({p.arxiv_url}) | [PDF link]({p.pdf_url})")
 
@@ -1321,12 +1328,12 @@ These scores are heuristic and should be used as a guide for exploration rather 
             st.write(summary)
 
             if p.prediction_explanations:
-                st.write("**Why this citation prediction (3 factors):**")
+                st.write("**Why this citation impact score (3 factors):**")
                 for ex in p.prediction_explanations[:3]:
                     st.write(f"- {ex}")
         else:
             st.markdown("**Plain English summary:** only available in OpenAI option")
-            st.markdown("**Why this citation prediction (3 factors):** only available in OpenAI option")
+            st.markdown("**Why this citation impact score (3 factors):** only available in OpenAI option")
 
         if p.focus_label:
             st.write(f"**Focus label:** {p.focus_label}")
@@ -1347,7 +1354,7 @@ These scores are heuristic and should be used as a guide for exploration rather 
     st.subheader("9. Export Top N Report")
 
     report_lines = [
-        f"# Top {top_n_effective} Papers (Citation Scores) - {datetime.now().isoformat()}",
+        f"# Top {top_n_effective} Papers (Citation Impact Scores) - {datetime.now().isoformat()}",
         "## Research Brief",
         research_brief,
         "",
@@ -1363,7 +1370,7 @@ These scores are heuristic and should be used as a guide for exploration rather 
     ]
     for rank, p in enumerate(topN, start=1):
         report_lines.append(f"## #{rank}: {p.title}")
-        report_lines.append(f"- Citation score (1 year): {int(p.predicted_citations or 0)}")
+        report_lines.append(f"- Citation impact score (1 year): {int(p.predicted_citations or 0)}")
         report_lines.append(f"- Authors: {', '.join(p.authors) if p.authors else 'Unknown'}")
         report_lines.append(f"- arXiv: {p.arxiv_url}")
         report_lines.append(f"- PDF: {p.pdf_url}")
@@ -1376,7 +1383,7 @@ These scores are heuristic and should be used as a guide for exploration rather 
         if p.semantic_reason:
             report_lines.append(f"- Relevance explanation: {p.semantic_reason}")
         if provider == "openai":
-            report_lines.append("- Prediction explanations:")
+            report_lines.append("- Citation score explanations:")
             if p.prediction_explanations:
                 for ex in p.prediction_explanations[:3]:
                     report_lines.append(f"  - {ex}")
