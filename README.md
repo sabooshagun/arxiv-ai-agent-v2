@@ -1,76 +1,83 @@
 # 📘 Research Agent v2
 
-A lightweight research assistant that finds, ranks, and explains recent AI papers from arXiv.
+A lightweight research assistant that finds, ranks, and analyzes recent AI papers from arXiv.
 
-Now supports both OpenAI models and a free local LLM backend.
+Research Agent v2 introduces two modes:
 
-This is the v2 Streamlit UI application.  
-Backend for the free model option lives in a separate repo.
+- **OpenAI mode** — full classification, prediction, and summaries
+- **Free local mode** — fully free and self-contained using local embeddings + heuristics
+
+There is no backend server in v2.  
+Everything runs inside the Streamlit app.
 
 ## 🚀 What's New in v2
 
-Research Agent v2 introduces a dual-mode architecture:
+### 1. OpenAI Mode (Full Features)
 
-### 1. OpenAI Mode
-
-For users with an OpenAI API key.  
-Provides the full experience:
+If you have an OpenAI API key, you get:
 
 - LLM-based relevance classification
 - Natural-language citation prediction
-- Plain English paper summaries
-- More accurate and more detailed results
+- Plain-English summaries for top papers
+- More accurate signal quality
+- Consistent explanations
 
-### 2. Free Local Model Mode
+This mode mirrors the original v1 workflow but with improved pipeline logic.
 
-For users who want a zero-cost option.
+### 2. Free Local Model Mode (Zero Cost)
 
-Powered by a separate backend server using:
+Runs entirely inside the Streamlit app using:
 
-- Phi-2 as the hosted LLM
-- MiniLM-L6-v2 as the embedding model
+- `sentence-transformers/all-MiniLM-L6-v2` for embeddings
+- Heuristic rules for:
+  - Primary vs secondary classification
+  - Citation scoring
+- No generative LLM needed
+- No API key needed
+- Skips plain-English summaries (to keep it fast and lightweight)
 
-This mode:
+This mode still:
 
-- Does not require any API key
-- Uses heuristic relevance scoring
-- Uses scaled citation scores instead of LLM reasoning
-- Skips plain English summaries to keep the backend fast
-- Still fetches and ranks up to 150 arXiv papers
+- Fetches up to 150 recent arXiv papers
+- Selects and classifies candidates
+- Builds a citation scoring set
+- Produces ranked results
 
-Both modes run through the same pipeline, differing only in how classification and prediction are computed.
+Designed for users who want a completely free and private pipeline.
 
-## 🧠 How Research Agent Works
+## 🧠 How the Pipeline Works
 
-Whether you use OpenAI or the free backend, the pipeline is:
+Regardless of mode:
 
 ### 1. You provide
 
-- A short research brief
-- Optional "not looking for" text
+- A research brief
+- Optional exclusions
 - A date range (3, 7, or 30 days)
 
 ### 2. The agent
 
-- Fetches recent cs.AI + cs.LG papers from arXiv
-- Computes embeddings
-- Selects up to 150 candidate papers
-- Classifies papers
-- Builds a prediction set (~20 minimum)
-- Predicts 1-year citation impact
+- Fetches recent cs.AI + cs.LG papers
+- Computes embeddings (local or OpenAI)
+- Selects up to 150 matching candidates
+- Assigns relevance labels
+- Builds a prediction set
+- Produces citation predictions
+  - LLM-based in OpenAI mode
+  - Heuristic-based in free mode
 - Ranks papers
-- Highlights the top N papers
+- Highlights the top N
 
 ### 3. You receive
 
-- A full ranked table
-- A clean UI with metadata and links
-- A summary for top N papers (OpenAI mode only)
-- A ZIP archive with all artifacts (JSON + markdown report)
+- A ranked table with metadata and links
+- Optional plain-English summaries (OpenAI mode only)
+- Optional citation explanation text (OpenAI mode only)
+- A downloadable ZIP of all reports and JSON artifacts
 
-## 💻 Running Locally (UI Only)
+## 💻 Run Locally (Recommended)
 
-**Clone:**
+**Clone the repo:**
 
 ```bash
 git clone https://github.com/YOUR_USER/arxiv-ai-agent-v2.git
@@ -96,102 +103,57 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Your browser will open:
+You will see:
 
 ```
 http://localhost:8501
 ```
 
-## 🔌 Choosing a Model Provider
+## 🔌 Model Provider Options
 
-### Option A: OpenAI
+### Option A — OpenAI (Full experience)
 
-In the sidebar:
+- Select **OpenAI** in the sidebar
+- Enter your API key (never saved locally)
+- Adds full LLM reasoning:
+  - Primary/secondary/off-topic classification
+  - Citation prediction paragraphs
+  - Plain English summaries
 
-1. Select **OpenAI**
-2. Enter your API key
-3. Run the pipeline
+### Option B — Free Local Mode (Default)
 
-OpenAI mode enables full classification, full citation prediction, and plain English summaries.
+- Select **Free Local Model**
+- No API key required
+- Everything runs inside Streamlit using:
+  - MiniLM embeddings
+  - Heuristic relevance scores
+  - Heuristic citation scoring
+- Summaries and explanations are disabled in this mode (OpenAI-only features).
 
-Your API key is never written to disk.
+## 🧩 Architecture Overview
 
-### Option B: Free Local Model (Default)
+### Free Local Mode (self-contained)
 
-No key required.
+- Loads MiniLM embeddings via `sentence-transformers`
+- Computes similarity-based relevance
+- Computes heuristic citation scores
+- No HTTP requests, no backend, no external APIs
 
-To use the free local LLM server:
+### OpenAI Mode
 
-**Clone the backend repo:**
-```
-https://github.com/YOUR_USER/arxiv-agent-backend
-```
-
-**Install backend dependencies**
-
-```bash
-cd arxiv-agent-backend
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-**Start the backend:**
-
-```bash
-python server.py
-```
-
-You should see:
-
-```
-Uvicorn running on http://0.0.0.0:8000
-```
-
-Run the UI and choose **Free Hosted Model** in the sidebar.
-
-The UI will call:
-
-- `POST /chat`
-- `POST /embeddings`
-
-using:
-
-```python
-FREE_LLM_API_BASE = http://localhost:8000
-```
-
-(You can override this with an environment variable if deploying the backend elsewhere.)
-
-## 🧩 Backend Architecture (Free Model)
-
-The backend exposes two endpoints:
-
-**POST /chat**
-
-- Uses Phi-2 via Transformers
-- Performs greedy decoding for speed
-- Max 200 new tokens
-
-**POST /embeddings**
-
-- Uses MiniLM-L6-v2 (SentenceTransformers)
-- Returns batched embedding vectors
-
-**GET /health**
-
-- Health check endpoint for Streamlit.
-
-Backend is CPU-only by default for stability across devices.
+- Uses OpenAI embeddings
+- Uses OpenAI for classification, prediction, summaries
+- Requires API key
+- Everything else (candidate selection, ranking, exporting) is shared.
 
 ## ⚠️ Limitations
 
-- Citation predictions are signals, not ground truth
-- Free backend mode uses heuristics, not LLM reasoning
-- Academic bias may appear in LLM predictions
-- Never use these scores alone for hiring or funding decisions
-- Always read the papers before drawing conclusions
+- Citation predictions are approximate signals
+- Free local mode offers heuristic predictions, not LLM reasoning
+- Academic bias may appear in model-based predictions
+- Do not use these scores as the sole basis for evaluation of researchers or grants
+- Always read the actual papers
 
 ## 📄 License
 
-MIT License (see LICENSE file)
+MIT License — see LICENSE.

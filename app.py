@@ -1,3 +1,5 @@
+# app.py
+
 import os
 import json
 import time
@@ -20,13 +22,26 @@ except ImportError as e:
     print("Please run: pip install streamlit requests feedparser openai")
     raise
 
+# Optional local embedding model for free mode
+try:
+    from sentence_transformers import SentenceTransformer  # type: ignore
+except ImportError:
+    SentenceTransformer = None  # type: ignore
+
+# =========================
+# Constants
+# =========================
 
 MIN_FOR_PREDICTION = 20
+OPENAI_EMBEDDING_MODEL_NAME = "text-embedding-3-large"
 
+
+# =========================
+# Data structures
+# =========================
 
 @dataclass
 class LLMConfig:
-    provider: str       # "openai" or "hosted"
     api_key: str
     model: str
     api_base: str
@@ -49,6 +64,10 @@ class Paper:
     focus_label: Optional[str] = None
     llm_relevance_score: Optional[float] = None
 
+
+# =========================
+# Utility functions
+# =========================
 
 def get_date_range(option: str) -> (date, date):
     today = date.today()
@@ -85,6 +104,10 @@ def build_query_brief(research_brief: str, not_looking_for: str) -> str:
     return "\n\n".join(parts)
 
 
+# =========================
+# Robust arXiv fetching
+# =========================
+
 def fetch_arxiv_papers_by_date(
     start_date: date,
     end_date: date,
@@ -92,13 +115,16 @@ def fetch_arxiv_papers_by_date(
     max_batches: int = 100,
     max_retries: int = 3,
 ) -> List[Paper]:
+    """
+    Fetch cs.AI + cs.LG papers from arXiv between start_date and end_date (inclusive).
+    """
     query = "(cat:cs.AI OR cat:cs.LG)"
     base_url = "https://export.arxiv.org/api/query"
 
     results: List[Paper] = []
     start_index = 0
 
-    for batch_idx in range(max_batches):
+    for _ in range(max_batches):
         params = {
             "search_query": query,
             "start": start_index,
@@ -121,7 +147,7 @@ def fetch_arxiv_papers_by_date(
                     st.error(
                         "arXiv returned HTTP 429 (rate limit) repeatedly. "
                         f"Collected {len(results)} papers so far. "
-                        "Try a shorter date range (for example Last Week) or run again later."
+                        "Try a shorter date range or run again later."
                     )
                     return results
                 wait_seconds = 5 * (2 ** (retries - 1))
@@ -197,72 +223,49 @@ def fetch_arxiv_papers_by_date(
     return results
 
 
+# =========================
+# Generic LLM call + JSON helper (OpenAI path)
+# =========================
+
 def call_llm(prompt: str, llm_config: LLMConfig, label: str = "") -> str:
     if "last_prompts" not in st.session_state:
         st.session_state["last_prompts"] = {}
     st.session_state["last_prompts"][label or "default"] = prompt
 
-    # OpenAI provider
-    if llm_config.provider == "openai":
-        try:
-            client = OpenAI(
-                api_key=llm_config.api_key,
-                base_url=llm_config.api_base,
-            )
-            messages = [
-                {"role": "system", "content": "You are a helpful AI assistant."},
-                {"role": "user", "content": prompt},
-            ]
-            kwargs: Dict[str, Any] = {
-                "model": llm_config.model,
-                "messages": messages,
-            }
-            if not llm_config.model.startswith("o1"):
-                kwargs["temperature"] = 0.2
-
-            resp = client.chat.completions.create(**kwargs)
-            return resp.choices[0].message.content
-
-        except NotFoundError:
-            st.error(
-                f"The model `{llm_config.model}` is not available for your API key. "
-                "Please choose a different model, for example gpt-4.1, gpt-4.1-mini, gpt-4o, or gpt-4o-mini."
-            )
-            st.stop()
-        except BadRequestError as e:
-            st.error(
-                f"Bad request when calling the model `{llm_config.model}`. "
-                f"Details: {e}"
-            )
-            st.stop()
-        except Exception as e:
-            st.error(f"LLM call failed ({label or 'general'}): {e}")
-            st.stop()
-
-    # Hosted provider
     try:
-        headers: Dict[str, str] = {}
-        if llm_config.api_key:
-            headers["Authorization"] = f"Bearer {llm_config.api_key}"
-
-        payload: Dict[str, Any] = {
-            "prompt": prompt,
+        client = OpenAI(
+            api_key=llm_config.api_key,
+            base_url=llm_config.api_base,
+        )
+        messages = [
+            {"role": "system", "content": "You are a helpful AI assistant."},
+            {"role": "user", "content": prompt},
+        ]
+        kwargs: Dict[str, Any] = {
             "model": llm_config.model,
+            "messages": messages,
         }
         if not llm_config.model.startswith("o1"):
-            payload["temperature"] = 0.2
+            kwargs["temperature"] = 0.2
 
-        url = llm_config.api_base.rstrip("/") + "/chat"
-        resp = requests.post(url, json=payload, headers=headers, timeout=300)
-        resp.raise_for_status()
-        data = resp.json()
-        content = data.get("content") or data.get("text") or ""
-        if not content:
-            raise ValueError("Hosted LLM returned empty content")
-        return content
+        resp = client.chat.completions.create(**kwargs)
+        return resp.choices[0].message.content
 
+    except NotFoundError:
+        st.error(
+            f"The model `{llm_config.model}` is not available for your API key. "
+            "Please choose a different model, for example `gpt-4.1`, `gpt-4.1-mini`, "
+            "`gpt-4o`, or `gpt-4o-mini`."
+        )
+        st.stop()
+    except BadRequestError as e:
+        st.error(
+            f"Bad request when calling the model `{llm_config.model}`. "
+            f"Details: {e}"
+        )
+        st.stop()
     except Exception as e:
-        st.error(f"Hosted LLM call failed ({label or 'general'}): {e}")
+        st.error(f"LLM call failed ({label or 'general'}): {e}")
         st.stop()
 
 
@@ -300,7 +303,11 @@ def safe_parse_json_array(raw: str) -> Optional[List[Dict[str, Any]]]:
     return None
 
 
-def embed_texts(
+# =========================
+# Embeddings
+# =========================
+
+def embed_texts_openai(
     texts: List[str],
     llm_config: LLMConfig,
     embedding_model: str,
@@ -308,55 +315,43 @@ def embed_texts(
     if not texts:
         return []
 
-    # OpenAI embeddings
-    if llm_config.provider == "openai":
-        client = OpenAI(api_key=llm_config.api_key, base_url=llm_config.api_base)
-        all_embeddings: List[List[float]] = []
-        batch_size = 100
-
-        for start in range(0, len(texts), batch_size):
-            batch = texts[start:start + batch_size]
-            try:
-                resp = client.embeddings.create(model=embedding_model, input=batch)
-            except Exception as e:
-                st.error(f"Embedding API call failed: {e}")
-                raise
-            for d in resp.data:
-                all_embeddings.append(d.embedding)
-
-        return all_embeddings
-
-    # Hosted embeddings endpoint
+    client = OpenAI(api_key=llm_config.api_key, base_url=llm_config.api_base)
     all_embeddings: List[List[float]] = []
     batch_size = 100
-    headers: Dict[str, str] = {}
-    if llm_config.api_key:
-        headers["Authorization"] = f"Bearer {llm_config.api_key}"
 
     for start in range(0, len(texts), batch_size):
         batch = texts[start:start + batch_size]
-        payload: Dict[str, Any] = {
-            "texts": batch,
-            "model": embedding_model,
-        }
         try:
-            url = llm_config.api_base.rstrip("/") + "/embeddings"
-            resp = requests.post(url, json=payload, headers=headers, timeout=300)
-            resp.raise_for_status()
-            data = resp.json()
-            embeddings = data.get("embeddings") or []
-            if len(embeddings) != len(batch):
-                raise ValueError(
-                    f"Hosted embeddings endpoint returned {len(embeddings)} vectors for "
-                    f"{len(batch)} texts"
-                )
-            for emb in embeddings:
-                all_embeddings.append(list(emb))
+            resp = client.embeddings.create(model=embedding_model, input=batch)
         except Exception as e:
-            st.error(f"Hosted embeddings API call failed: {e}")
+            st.error(f"Embedding API call failed: {e}")
             raise
+        for d in resp.data:
+            all_embeddings.append(d.embedding)
 
     return all_embeddings
+
+
+@st.cache_resource(show_spinner=False)
+def get_local_embed_model() -> SentenceTransformer:
+    if SentenceTransformer is None:
+        raise RuntimeError(
+            "sentence-transformers is not installed. "
+            "Run `pip install sentence-transformers` in your environment."
+        )
+    return SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+
+
+def embed_texts_local(texts: List[str]) -> List[List[float]]:
+    if not texts:
+        return []
+    try:
+        model = get_local_embed_model()
+    except Exception as e:
+        st.error(f"Local embedding model is not available. Details: {e}")
+        st.stop()
+    vectors = model.encode(texts, convert_to_numpy=True)
+    return vectors.tolist()
 
 
 def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
@@ -377,30 +372,40 @@ def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
 def select_embedding_candidates(
     papers: List[Paper],
     query_brief: str,
-    llm_config: LLMConfig,
+    llm_config: Optional[LLMConfig],
     embedding_model: str,
-    max_candidates: int,
+    provider: str,
+    max_candidates: int = 150,
 ) -> List[Paper]:
+    """
+    From all fetched papers, pick the top-K most semantically similar to the brief.
+    provider: "openai" or "free_local"
+    """
     if not papers:
         return []
 
     try:
-        query_vecs = embed_texts(
-            [query_brief],
-            llm_config=llm_config,
-            embedding_model=embedding_model,
-        )
-        query_vec = query_vecs[0]
+        if provider == "openai":
+            query_vec = embed_texts_openai(
+                [query_brief],
+                llm_config=llm_config,
+                embedding_model=embedding_model,
+            )[0]
+        else:
+            query_vec = embed_texts_local([query_brief])[0]
     except Exception:
         return papers
 
     texts = [p.title + "\n\n" + p.abstract for p in papers]
     try:
-        paper_vecs = embed_texts(
-            texts,
-            llm_config=llm_config,
-            embedding_model=embedding_model,
-        )
+        if provider == "openai":
+            paper_vecs = embed_texts_openai(
+                texts,
+                llm_config=llm_config,
+                embedding_model=embedding_model,
+            )
+        else:
+            paper_vecs = embed_texts_local(texts)
     except Exception:
         return papers
 
@@ -411,17 +416,20 @@ def select_embedding_candidates(
         scored.append((sim, p))
 
     scored.sort(key=lambda x: x[0], reverse=True)
-
     k = min(max_candidates, len(scored))
     candidates = [p for _, p in scored[:k]]
     return candidates
 
 
+# =========================
+# LLM relevance classification (OpenAI) + heuristic classification (free)
+# =========================
+
 def classify_papers_with_llm(
     papers: List[Paper],
     query_brief: str,
     llm_config: LLMConfig,
-    batch_size: int = 5,
+    batch_size: int = 15,
 ) -> List[Paper]:
     if not papers:
         return papers
@@ -451,15 +459,13 @@ def classify_papers_with_llm(
              - "primary": The paper's MAIN contribution clearly and directly addresses
                the research brief.
              - "secondary": The paper is mainly about something else and the user's
-               topic only appears as a minor application or example. Generic LLM or
-               foundation model papers that simply list the user's topic among many
-               tasks MUST be labeled "secondary", not "primary".
+               topic only appears as a minor application or example.
              - "off-topic": The paper does not meaningfully address the research brief.
 
           2. relevance_score: a float between 0.0 and 1.0 for how well the paper serves
              the user's interests, given its focus_label.
 
-          3. reason: a 1 to 2 sentence explanation for the label.
+          3. reason: a 1–2 sentence explanation for the label.
 
         Return a JSON array, one entry per paper:
           {{
@@ -485,7 +491,7 @@ def classify_papers_with_llm(
                 p.focus_label = "secondary"
                 p.llm_relevance_score = 0.5
                 if p.semantic_reason is None:
-                    p.semantic_reason = "Classification failed. Defaulted to secondary relevance."
+                    p.semantic_reason = "LLM classification failed. Defaulted to secondary relevance."
             continue
 
         idx_to_info: Dict[int, Dict[str, Any]] = {}
@@ -519,6 +525,39 @@ def classify_papers_with_llm(
 
     return papers
 
+
+def heuristic_classify_papers_free(candidates: List[Paper]) -> List[Paper]:
+    if not candidates:
+        return candidates
+
+    ranked = sorted(
+        candidates,
+        key=lambda p: p.semantic_relevance if p.semantic_relevance is not None else 0.0,
+        reverse=True,
+    )
+
+    n = len(ranked)
+    if n == 0:
+        return ranked
+
+    top_k = max(1, min(n, max(10, int(0.3 * n))))
+
+    for idx, p in enumerate(ranked):
+        sim = p.semantic_relevance if p.semantic_relevance is not None else 0.0
+        p.llm_relevance_score = sim
+        if idx < top_k:
+            p.focus_label = "primary"
+        else:
+            p.focus_label = "secondary"
+        if p.semantic_reason is None:
+            p.semantic_reason = "Heuristic classification in free local mode based on embedding similarity."
+
+    return ranked
+
+
+# =========================
+# Direct citation prediction helpers (OpenAI) + heuristic citations (free)
+# =========================
 
 def build_direct_prediction_prompt(target_papers: List[Paper]) -> str:
     paper_blocks = []
@@ -571,22 +610,11 @@ def predict_citations_direct(
     llm_config: LLMConfig,
     batch_size: int = 8,
 ) -> List[Paper]:
-    """
-    Predict 1 year citations in batches, with robust JSON parsing.
-
-    Behavior:
-      1) Try to use the LLM and JSON output.
-      2) For any paper that does not get a usable LLM prediction,
-         fall back to a score based heuristic that maps relevance
-         scores to a citation range.
-    """
     if not target_papers:
         return target_papers
 
     title_to_paper: Dict[str, Paper] = {p.title: p for p in target_papers}
-    got_llm_pred: Dict[str, bool] = {p.title: False for p in target_papers}
 
-    # Try LLM predictions
     for start in range(0, len(target_papers), batch_size):
         batch = target_papers[start:start + batch_size]
         prompt = build_direct_prediction_prompt(batch)
@@ -598,21 +626,16 @@ def predict_citations_direct(
                 "Failed to parse LLM output as JSON for one prediction batch. "
                 "Showing a raw snippet below for debugging."
             )
-            st.code(str(llm_output)[:1000])
+            st.code(llm_output[:1000])
             continue
 
         for item in parsed:
-            if not isinstance(item, dict):
-                continue
-
             title = item.get("title")
             if not isinstance(title, str):
                 continue
-
             p = title_to_paper.get(title)
             if not p:
                 continue
-
             try:
                 p.predicted_citations = float(item.get("predicted_citations", 0))
             except Exception:
@@ -622,49 +645,35 @@ def predict_citations_direct(
             if isinstance(explanations, list):
                 p.prediction_explanations = [str(ex) for ex in explanations[:3]]
 
-            got_llm_pred[title] = True
-
-    # Fallback for missing predictions
-    missing = [p for p in target_papers if not got_llm_pred.get(p.title, False)]
-
-    if missing:
-        st.warning(
-            f"Heuristic fallback: {len(missing)} papers did not receive usable LLM predictions. "
-            "Assigning predicted citations based on relevance scores instead."
-        )
-
-        def paper_score(p: Paper) -> float:
-            if p.llm_relevance_score is not None:
-                return p.llm_relevance_score
-            if p.semantic_relevance is not None:
-                return p.semantic_relevance
-            return 0.0
-
-        scores = [paper_score(p) for p in missing]
-        score_min = min(scores) if scores else 0.0
-        score_max = max(scores) if scores else 0.0
-
-        max_c = 30.0
-        min_c = 5.0
-        span_c = max_c - min_c
-
-        for p in missing:
-            s = paper_score(p)
-            if score_max > score_min + 1e-6:
-                norm = (s - score_min) / (score_max - score_min)
-                norm = max(0.0, min(1.0, norm))
-            else:
-                norm = 0.5
-
-            pred = min_c + span_c * norm
-            p.predicted_citations = float(int(round(pred)))
-            if not p.prediction_explanations:
-                p.prediction_explanations = [
-                    "This estimated citation count is based on how closely the paper matches your research brief."
-                ]
-
     return list(title_to_paper.values())
 
+
+def assign_heuristic_citations_free(papers: List[Paper]) -> List[Paper]:
+    if not papers:
+        return papers
+
+    scores: List[float] = []
+    for p in papers:
+        rel = p.llm_relevance_score if p.llm_relevance_score is not None else 0.0
+        sem = p.semantic_relevance if p.semantic_relevance is not None else 0.0
+        score = 0.7 * rel + 0.3 * sem
+        scores.append(score)
+
+    min_s = min(scores)
+    max_s = max(scores)
+    for p, s in zip(papers, scores):
+        if max_s > min_s:
+            norm = (s - min_s) / (max_s - min_s)
+        else:
+            norm = 0.5
+        p.predicted_citations = float(int(10 + norm * 40))  # Rough 10–50 range
+
+    return papers
+
+
+# =========================
+# Plain English summary helper (OpenAI only)
+# =========================
 
 def summarize_paper_plain_english(paper: Paper, llm_config: LLMConfig) -> str:
     prompt = textwrap.dedent(f"""
@@ -684,12 +693,16 @@ def summarize_paper_plain_english(paper: Paper, llm_config: LLMConfig) -> str:
     - The main idea or approach in simple terms.
     - One or two key takeaways for a non-technical reader.
 
-    Avoid heavy jargon, equations, or implementation details. Aim for 3 to 6 short bullet points or short paragraphs.
+    Avoid heavy jargon, equations, or implementation details. Aim for 3–6 short bullet points or short paragraphs.
     """).strip()
 
     summary = call_llm(prompt, llm_config, label="plain_english_summary")
     return summary
 
+
+# =========================
+# Streamlit UI
+# =========================
 
 def main():
     st.set_page_config(
@@ -702,70 +715,53 @@ def main():
     top_col1, top_col2 = st.columns([3, 1])
     with top_col1:
         st.write(
-            "A research assistant for recent AI papers on arxiv.org, powered by LLMs with both OpenAI and free hosted modes."
+            "A research assistant that finds, ranks, and explains recent AI papers on arxiv.org."
         )
     with top_col2:
         st.link_button(
-            "▶ Watch the original demo",
+            "▶ Watch a short demo",
             "https://youtu.be/PqJiYTvOP1M"
         )
 
     st.markdown("""
 #### Describe what you want
 
-You write a short research brief in natural language about the kind of work you care about, and optionally what you are not interested in. If you leave both fields empty, the agent switches to a global mode and just looks for the most impactful recent cs.AI and cs.LG papers overall.
+You write a short research brief in natural language about the kind of work you care about, and optionally what you are not interested in. If you leave both fields empty, the agent switches to a global mode and just looks for the most impactful recent cs.AI + cs.LG papers overall.
 
 #### The agent fetches recent arXiv papers
 
-It fetches up to about 5000 papers from arxiv.org in the Artificial Intelligence and Machine Learning categories (cs.AI and cs.LG) for the date range you choose.
+It fetches up to about 5000 papers from arxiv.org in the Artificial Intelligence and Machine Learning categories (`cs.AI` and `cs.LG`) for the date range you choose.
 
 #### The agent picks candidate papers
 
-- In targeted mode, the agent uses vector embeddings to measure how close each paper's title and abstract are to your brief in meaning and keeps up to 150 candidates.  
-- In global mode, it simply takes the 150 most recent cs.AI plus cs.LG papers as candidates when available.
+- In **targeted mode**, the agent uses embeddings to measure how close each paper's title and abstract are to your brief in meaning and keeps the top 150 as candidates.  
+- In **global mode**, it simply takes the most recent 150 `cs.AI` + `cs.LG` papers as candidates.
 
 #### The agent judges how relevant each paper is
 
-In targeted mode the agent labels each candidate as:
-
-- primary: the main contribution directly matches your brief  
-- secondary: your topic is only a minor part or example  
-- off topic: not really about your brief  
-
-In OpenAI mode, this is done with an LLM reading your brief and each abstract.  
-In free hosted mode, this is done with a simple heuristic based on embedding similarity and ranking.
-
-In global mode all candidates are treated as primary and this step is skipped.
+- In **OpenAI mode**, an LLM reads each candidate and labels it as primary, secondary, or off topic.  
+- In **free local mode**, a simple heuristic uses the embedding similarity to mark the most relevant papers as primary and the rest as secondary.
 
 #### The agent builds a prediction set
 
 The agent builds a set of papers to send to the citation prediction step:
 
-- It keeps all primary papers.  
-- If there are fewer than about 20, it tops up with the strongest secondary papers until it reaches roughly 20, when possible.  
+- It keeps all **primary** papers.  
+- If there are fewer than about 20, it tops up with the strongest **secondary** papers until it reaches roughly 20, when possible.  
 - In global mode, all candidates are used.
 
-#### The agent predicts 1 year citation counts
+#### The agent predicts 1-year citation impact
 
-For each paper in the prediction set, the agent estimates how many citations it might receive one year after publication.
+- In **OpenAI mode**, an LLM estimates how many citations each paper might receive one year after publication and provides short explanations.  
+- In **free local mode**, the agent derives a citation score from the relevance signals and uses that to rank papers.
 
-- In OpenAI mode, this uses an LLM prompt that reads each abstract and returns predicted citation counts and short explanations.  
-- In free hosted mode, it uses the same interface where possible and falls back to a score based heuristic that maps relevance scores to a citation range if the LLM output is not usable.
-
-These predictions are heuristic impact signals and are best used for ranking within this batch, not as ground truth.
+These scores are heuristic impact signals and are best used for ranking within this batch, not as ground truth.
 
 #### The agent ranks, summarizes, and saves results
 
-The agent ranks papers by predicted citation count, always showing primary papers first, then secondary ones. For the top N that you choose, it shows:
-
-- Paper metadata, links, and abstract  
-- In OpenAI mode, a plain English summary and explanation of why it matches your brief  
-- In both modes, a ranked table and a markdown report
-
-All intermediate artifacts and a markdown report are saved in a project folder under `~/arxiv_ai_digest_projects/project_<timestamp>`, and you can download everything as a ZIP.
+The agent ranks papers, always showing **primary** papers first, then secondary ones. For the top N that you choose, it shows metadata, relevance signals, and links to arXiv and the PDF. In OpenAI mode it also adds plain English summaries. All artifacts and a markdown report are saved in a project folder under `~/arxiv_ai_digest_projects/project_<timestamp>`, and you can download everything as a ZIP.
     """)
 
-    # Sidebar
     with st.sidebar:
         st.header("🧠 Research Brief")
 
@@ -782,7 +778,7 @@ All intermediate artifacts and a markdown report are saved in a project folder u
             height=200,
             help="Describe your research interest in natural language. Focus on what the main contribution "
                  "of the papers should be. If you leave this and the next box empty, the agent will perform "
-                 "a global digest of recent cs.AI and cs.LG papers."
+                 "a global digest of recent cs.AI + cs.LG papers."
         )
 
         not_looking_for = st.text_area(
@@ -801,29 +797,32 @@ All intermediate artifacts and a markdown report are saved in a project folder u
             1, 10, 3
         )
 
-        st.markdown("### 🤖 LLM Provider")
+        st.markdown("### 🔌 Provider")
+
+        provider_label_free = "Free local model (no API key)"
+        provider_label_openai = "OpenAI (API key required)"
 
         provider_choice = st.radio(
-            "Choose LLM provider",
-            ["Free hosted model", "OpenAI"],
+            "Choose provider",
+            [provider_label_free, provider_label_openai],
             index=0,
-            help="Free hosted model uses an open source LLM served by a backend. "
-                 "OpenAI uses your own API key and account."
         )
 
-        if provider_choice == "OpenAI":
+        if provider_choice == provider_label_openai:
             provider = "openai"
+        else:
+            provider = "free_local"
 
-            st.markdown("#### OpenAI settings")
+        api_base = "https://api.openai.com/v1"
 
+        if provider == "openai":
+            st.markdown("### 🤖 OpenAI Settings")
             api_key = st.text_input("OpenAI API Key", type="password")
             st.caption(
                 "Your API key is used only in memory for this session, is never written to disk, "
                 "and is never shared with anyone or any service other than OpenAI's API. "
                 "When your session ends, the key is cleared from the app's state."
             )
-
-            api_base = "https://api.openai.com/v1"
 
             openai_models = [
                 "gpt-4.1-mini",
@@ -834,7 +833,7 @@ All intermediate artifacts and a markdown report are saved in a project folder u
                 "Custom",
             ]
             model_choice = st.selectbox(
-                "OpenAI Chat model (for classification and citation prediction)",
+                "OpenAI Chat model (for classification & citation prediction)",
                 openai_models,
                 index=0,
             )
@@ -847,34 +846,18 @@ All intermediate artifacts and a markdown report are saved in a project folder u
             else:
                 model_name = model_choice
 
+            embedding_model_name = OPENAI_EMBEDDING_MODEL_NAME
+            st.caption(f"Embeddings (OpenAI): `{embedding_model_name}`")
         else:
-            provider = "hosted"
-
-            st.markdown("#### Free hosted model")
-
-            st.caption(
-                "Uses an open source LLM and embedding model served by a backend. "
-                "No OpenAI account or API key is required. Plain English summaries are skipped in this mode."
-            )
-
             api_key = ""
-            api_base = os.getenv("FREE_LLM_API_BASE", "http://localhost:8000")
-            model_name = os.getenv("FREE_LLM_MODEL_NAME", "phi-2")
-
-        # Logical embedding model name
-        embedding_model_name = "text-embedding-3-large"
-
-        if provider == "openai":
-            st.caption("Embedding model (OpenAI): `text-embedding-3-large`")
-        else:
+            model_name = "heuristic-free-local"
+            embedding_model_name = "sentence-transformers/all-MiniLM-L6-v2"
             st.caption(
-                "Embedding model: decided by the hosted backend "
-                "(for example a SentenceTransformers or BGE model)."
+                f"Embeddings (local): `{embedding_model_name}`.\n"
+                "Classification and citation ranking use simple heuristics. No API key or external calls."
             )
 
         run_clicked = st.button("🚀 Run Pipeline")
-
-    candidate_limit = 150
 
     params = {
         "research_brief": research_brief.strip(),
@@ -907,29 +890,22 @@ All intermediate artifacts and a markdown report are saved in a project folder u
         ]:
             st.session_state.pop(key, None)
         st.session_state["last_params"] = params.copy()
-        st.info("Sidebar settings changed. Click Run Pipeline to generate new results.")
+        st.info("Sidebar settings changed. Click **Run Pipeline** to generate new results.")
         return
 
     if run_clicked:
         st.session_state["last_params"] = params.copy()
 
-    # Basic validation
     if provider == "openai":
         if not api_key or not model_name:
             if "ranked_papers" not in st.session_state:
-                st.warning("Your OpenAI API key and chat model name are required when using the OpenAI provider.")
+                st.warning("Your OpenAI API key and chat model name are required to run in OpenAI mode.")
                 return
     else:
-        if not api_base or not model_name:
-            if "ranked_papers" not in st.session_state:
-                st.error(
-                    "Hosted provider is misconfigured. "
-                    "The backend URL or model name is missing."
-                )
-                return
+        api_key = api_key or ""
+        model_name = model_name or "heuristic-free-local"
 
     llm_config = LLMConfig(
-        provider=provider,
         api_key=api_key or "",
         model=model_name,
         api_base=api_base,
@@ -964,7 +940,7 @@ All intermediate artifacts and a markdown report are saved in a project folder u
     st.session_state["current_end"] = current_end
 
     if not run_clicked and "ranked_papers" not in st.session_state:
-        st.info("Fill in your research brief and settings in the sidebar, then click Run Pipeline.")
+        st.info("Fill in your research brief and settings in the sidebar, then click **Run Pipeline**.")
         return
 
     # 1. Project setup
@@ -998,15 +974,15 @@ All intermediate artifacts and a markdown report are saved in a project folder u
         "llm_model": model_name,
         "llm_api_base": api_base,
         "embedding_model": embedding_model_name,
-        "llm_provider": "OpenAI" if provider == "openai" else "HostedFreeLLM",
+        "llm_provider": "OpenAI" if provider == "openai" else "FreeLocalHeuristic",
         "top_n": top_n,
         "min_for_prediction": MIN_FOR_PREDICTION,
     }
     st.session_state["config"] = config
     save_json(os.path.join(project_folder, "config.json"), config)
 
-    # 2. Fetch arxiv papers
-    st.subheader("2. Fetch Current Papers from arXiv (cs.AI plus cs.LG)")
+    # 2. Fetch current papers
+    st.subheader("2. Fetch Current Papers from arXiv (cs.AI + cs.LG)")
 
     if run_clicked or "current_papers" not in st.session_state:
         with st.spinner("Fetching cs.AI and cs.LG papers from arXiv by date window..."):
@@ -1023,7 +999,7 @@ All intermediate artifacts and a markdown report are saved in a project folder u
         return
 
     st.success(
-        f"Fetched {len(current_papers)} cs.AI plus cs.LG papers in this date range "
+        f"Fetched {len(current_papers)} cs.AI + cs.LG papers in this date range "
         "(before any candidate selection)."
     )
 
@@ -1041,18 +1017,12 @@ All intermediate artifacts and a markdown report are saved in a project folder u
                 key=lambda p: p.submitted_date,
                 reverse=True,
             )
-            if len(sorted_papers) > candidate_limit:
-                candidates = sorted_papers[:candidate_limit]
-            else:
-                candidates = sorted_papers
+            candidates = sorted_papers[:150] if len(sorted_papers) > 150 else sorted_papers
             st.session_state["candidates"] = candidates
         else:
             candidates = st.session_state["candidates"]
 
-        st.success(
-            f"{len(candidates)} most recent cs.AI plus cs.LG papers selected as candidates "
-            f"(global mode, limit {candidate_limit})."
-        )
+        st.success(f"{len(candidates)} most recent cs.AI + cs.LG papers selected as candidates (global mode).")
     else:
         st.subheader("3. Embedding Based Candidate Selection")
         if run_clicked or "candidates" not in st.session_state:
@@ -1060,9 +1030,10 @@ All intermediate artifacts and a markdown report are saved in a project folder u
                 candidates = select_embedding_candidates(
                     current_papers,
                     query_brief=query_brief,
-                    llm_config=llm_config,
-                    embedding_model=embedding_model_name,
-                    max_candidates=candidate_limit,
+                    llm_config=llm_config if provider == "openai" else None,
+                    embedding_model=OPENAI_EMBEDDING_MODEL_NAME if provider == "openai" else embedding_model_name,
+                    provider=provider,
+                    max_candidates=150,
                 )
             if not candidates:
                 st.warning("Embedding stage returned no candidates. Using all fetched papers as fallback.")
@@ -1071,10 +1042,7 @@ All intermediate artifacts and a markdown report are saved in a project folder u
         else:
             candidates = st.session_state["candidates"]
 
-        st.success(
-            f"{len(candidates)} top candidates selected by embedding similarity for relevance handling "
-            f"(limit {candidate_limit})."
-        )
+        st.success(f"{len(candidates)} top candidates selected by embedding similarity for further filtering.")
 
     save_json(
         os.path.join(project_folder, "candidates_embedding_selected.json"),
@@ -1096,44 +1064,22 @@ All intermediate artifacts and a markdown report are saved in a project folder u
                 if p.semantic_reason is None:
                     p.semantic_reason = "Global mode: no topical filtering; treated as primary."
     else:
-        if provider == "hosted":
-            st.info(
-                "Hosted free mode: using a simple heuristic based on embedding similarity "
-                "instead of LLM based classification."
-            )
+        if provider == "openai":
             if run_clicked or any(p.focus_label is None for p in candidates):
-                sorted_cands = sorted(
-                    candidates,
-                    key=lambda p: p.semantic_relevance if p.semantic_relevance is not None else 0.0,
-                    reverse=True,
-                )
-                n = len(sorted_cands)
-                n_primary = max(5, int(0.3 * n))
-                n_secondary = max(0, int(0.7 * n) - n_primary)
-
-                for i, p in enumerate(sorted_cands):
-                    if i < n_primary:
-                        p.focus_label = "primary"
-                    elif i < n_primary + n_secondary:
-                        p.focus_label = "secondary"
-                    else:
-                        p.focus_label = "off-topic"
-                    p.llm_relevance_score = p.semantic_relevance if p.semantic_relevance is not None else 0.0
-                    if p.semantic_reason is None:
-                        p.semantic_reason = (
-                            "This paper is ranked here based on how closely its abstract matches your research brief."
-                        )
-                candidates = sorted_cands
-                st.session_state["candidates"] = candidates
-        else:
-            if run_clicked or any(p.focus_label is None for p in candidates):
-                with st.spinner("Classifying candidates as PRIMARY, SECONDARY, or OFF TOPIC using OpenAI..."):
+                with st.spinner("Classifying candidates as PRIMARY, SECONDARY, or OFF TOPIC (OpenAI)..."):
                     candidates = classify_papers_with_llm(
                         candidates,
                         query_brief=query_brief,
                         llm_config=llm_config,
-                        batch_size=5,
+                        batch_size=15,
                     )
+                st.session_state["candidates"] = candidates
+        else:
+            st.info(
+                "Free local mode: using a simple heuristic based on embedding similarity instead of LLM based classification."
+            )
+            if run_clicked or any(p.focus_label is None for p in candidates):
+                candidates = heuristic_classify_papers_free(candidates)
                 st.session_state["candidates"] = candidates
 
     save_json(
@@ -1141,16 +1087,16 @@ All intermediate artifacts and a markdown report are saved in a project folder u
         [asdict(p) for p in candidates],
     )
 
-    # 5. Build prediction set
-    st.subheader("5. Automatically Selected Papers for Citation Prediction")
+    # 5. Build prediction set with minimum size
+    st.subheader("5. Automatically Selected Papers for Citation Scoring")
 
     if mode == "global":
         primary_papers = [p for p in candidates]
         secondary_papers: List[Paper] = []
         used_papers = primary_papers.copy()
-        used_label = "Global mode: all candidate papers treated as PRIMARY and used for prediction."
+        used_label = "Global mode: all candidate papers treated as PRIMARY and used for citation scoring."
         st.success(
-            f"Global mode: using {len(used_papers)} most recent cs.AI plus cs.LG papers for citation prediction."
+            f"Global mode: using {len(used_papers)} most recent cs.AI + cs.LG papers for citation scoring."
         )
     else:
         primary_papers = [p for p in candidates if p.focus_label == "primary"]
@@ -1172,7 +1118,7 @@ All intermediate artifacts and a markdown report are saved in a project folder u
                 used_label = "All PRIMARY papers (enough for prediction set)"
                 st.success(
                     f"{len(primary_papers)} papers classified as PRIMARY. "
-                    f"Using all of them for citation prediction (≥ {MIN_FOR_PREDICTION})."
+                    f"Using all of them for citation scoring (≥ {MIN_FOR_PREDICTION})."
                 )
             else:
                 used_papers = primary_papers.copy()
@@ -1182,15 +1128,15 @@ All intermediate artifacts and a markdown report are saved in a project folder u
                     used_papers.extend(topups)
                     total = len(used_papers)
                     if len(secondary_papers) >= needed:
-                        used_label = f"PRIMARY plus top {len(topups)} SECONDARY to reach about {MIN_FOR_PREDICTION}"
+                        used_label = f"PRIMARY + top {len(topups)} SECONDARY to reach about {MIN_FOR_PREDICTION}"
                         st.info(
                             f"{len(primary_papers)} papers classified as PRIMARY. "
                             f"Added {len(topups)} top SECONDARY papers to reach about {MIN_FOR_PREDICTION} "
-                            "for citation prediction."
+                            "for citation scoring."
                         )
                     else:
                         used_label = (
-                            f"All PRIMARY plus all available SECONDARY "
+                            f"All PRIMARY + all available SECONDARY "
                             f"(only {len(secondary_papers)} secondary papers, total {total} < {MIN_FOR_PREDICTION})"
                         )
                         st.info(
@@ -1202,7 +1148,7 @@ All intermediate artifacts and a markdown report are saved in a project folder u
                     used_label = "All PRIMARY papers (no SECONDARY available)"
                     st.warning(
                         f"Only {len(primary_papers)} PRIMARY papers and no SECONDARY. "
-                        "Using all PRIMARY papers for prediction even though this is below the "
+                        "Using all PRIMARY papers for scoring even though this is below the "
                         f"target of {MIN_FOR_PREDICTION}."
                     )
         elif secondary_papers:
@@ -1233,27 +1179,27 @@ All intermediate artifacts and a markdown report are saved in a project folder u
     )
 
     st.write(
-        "These are the papers that the pipeline will use for citation prediction. "
-        "Selection is automatic based on mode, embeddings, and relevance classification."
+        "These are the papers that the pipeline will use for citation scoring. "
+        "Selection is automatic based on mode, embeddings (in targeted modes), and relevance classification."
     )
-    st.write(f"Prediction set description: {used_label}")
-    st.write(f"Number of papers in prediction set: {len(used_papers)}")
+    st.write(f"**Prediction set description:** {used_label}")
+    st.write(f"**Number of papers in prediction set:** {len(used_papers)}")
 
     for p in used_papers:
         with st.expander(p.title, expanded=False):
-            st.write(f"Authors: {', '.join(p.authors) if p.authors else 'Unknown'}")
-            st.write(f"Submitted: {p.submitted_date.date().isoformat()}")
+            st.write(f"**Authors:** {', '.join(p.authors) if p.authors else 'Unknown'}")
+            st.write(f"**Submitted:** {p.submitted_date.date().isoformat()}")
             st.write(f"[arXiv link]({p.arxiv_url}) | [PDF link]({p.pdf_url})")
             if p.focus_label:
-                st.write(f"Focus label: {p.focus_label}")
+                st.write(f"**Focus label:** {p.focus_label}")
             rel_str = f"{p.llm_relevance_score:.2f}" if p.llm_relevance_score is not None else "N/A"
-            st.write(f"LLM relevance score: {rel_str}")
+            st.write(f"**Relevance score:** {rel_str}")
             sim_str = f"{p.semantic_relevance:.3f}" if p.semantic_relevance is not None else "N/A"
-            st.write(f"Embedding similarity score: {sim_str}")
+            st.write(f"**Embedding similarity score:** {sim_str}")
             if p.semantic_reason:
-                st.write("Why this paper matches your brief:")
+                st.write("**Why this paper is (or is not) relevant to your brief:**")
                 st.write(p.semantic_reason)
-            st.write("Abstract:")
+            st.write("**Abstract:**")
             st.write(p.abstract)
 
     selected_papers = used_papers
@@ -1263,26 +1209,41 @@ All intermediate artifacts and a markdown report are saved in a project folder u
     )
 
     # 6. Predict citations
-    st.subheader("6. Predict Citations with LLM")
+    st.subheader("6. Citation Prediction")
 
-    st.markdown("""
-For each selected paper, Research Agent sends the title, authors, and abstract to the model and asks it to estimate how many citations the paper might receive one year after publication. The model bases its estimate on signals such as how trendy the topic is, how novel and substantial the abstract sounds, how broad the potential audience is, and whether the work appears to come from strong labs or well known authors.
+    if provider == "openai":
+        st.markdown("""
+**How this step works (OpenAI mode)**
 
-The predicted citation counts are heuristic impact signals, not precise forecasts. They are best used for ranking and prioritization within this batch of papers, not as ground truth. The model may reflect existing academic biases, for example favoring well known authors, large labs, English language venues, or hot topics. These scores should never be used on their own for hiring, promotion, funding, or other formal evaluation decisions.
-    """)
+For each selected paper, the agent sends the title, authors, and abstract to an OpenAI model and asks it to estimate how many citations the paper might receive one year after publication. The model bases its estimate on signals such as how trendy the topic is, how novel and substantial the abstract sounds, how broad the potential audience is, and whether the work appears to come from strong labs or well known authors.
+
+These predicted citation counts are heuristic impact signals and are best used for ranking and prioritization within this batch of papers, not as ground truth. They may reflect existing academic biases.
+        """)
+    else:
+        st.markdown("""
+**How this step works (free local mode)**
+
+In free local mode, the agent does not call any external LLM. Instead, it combines the embedding based similarity and relevance scores into a single numeric score and uses that score as a proxy for 1 year citation impact. The absolute numbers are less important than the ranking.
+
+These scores are heuristic and should be used as a guide for exploration rather than as formal evaluation metrics.
+        """)
 
     if run_clicked or "ranked_papers" not in st.session_state:
-        with st.spinner("Calling model to predict citations for selected papers..."):
-            papers_with_pred = predict_citations_direct(
-                target_papers=selected_papers,
-                llm_config=llm_config,
-            )
+        if provider == "openai":
+            with st.spinner("Calling OpenAI to predict citations for selected papers..."):
+                papers_with_pred = predict_citations_direct(
+                    target_papers=selected_papers,
+                    llm_config=llm_config,
+                )
+        else:
+            with st.spinner("Computing heuristic citation scores from relevance signals..."):
+                papers_with_pred = assign_heuristic_citations_free(selected_papers)
 
         papers_with_pred = [
             p for p in papers_with_pred if p.predicted_citations is not None
         ]
         if not papers_with_pred:
-            st.error("The model did not return predictions for any selected papers, and heuristic fallback also failed.")
+            st.error("Citation prediction did not produce any predictions.")
             return
 
         primary_pred = [p for p in papers_with_pred if p.focus_label == "primary"]
@@ -1303,7 +1264,6 @@ The predicted citation counts are heuristic impact signals, not precise forecast
         others_pred_sorted = sort_by_pred(others_pred)
 
         ranked_papers = primary_pred_sorted + secondary_pred_sorted + others_pred_sorted
-
         st.session_state["ranked_papers"] = ranked_papers
     else:
         ranked_papers = st.session_state["ranked_papers"]
@@ -1313,12 +1273,12 @@ The predicted citation counts are heuristic impact signals, not precise forecast
         [asdict(p) for p in ranked_papers],
     )
 
-    # 7. Ranked list
-    st.subheader("7. All Selected Papers (Ranked by Predicted Citations)")
+    # 7. All selected papers ranked
+    st.subheader("7. All Selected Papers (Ranked by Citation Score)")
 
-    st.caption("Primary papers appear first, ranked by predicted citations, followed by secondary papers.")
+    st.caption("Primary papers appear first, ranked by predicted citations or heuristic scores, followed by secondary papers.")
 
-    header = "| Rank | Predicted citations (1y) | Focus label | LLM relevance | Embedding similarity | Title |\n"
+    header = "| Rank | Citation score (1y) | Focus label | Relevance score | Embedding similarity | Title |\n"
     sep = "|---:|---:|---|---:|---:|---|\n"
     rows_md = []
     for rank, p in enumerate(ranked_papers, start=1):
@@ -1343,11 +1303,10 @@ The predicted citation counts are heuristic impact signals, not precise forecast
 
     for rank, p in enumerate(topN, start=1):
         st.markdown(f"### #{rank}: {p.title}")
-        st.write(f"Predicted citations (1 year): {int(p.predicted_citations or 0)}")
-        st.write(f"Authors: {', '.join(p.authors) if p.authors else 'Unknown'}")
+        st.write(f"**Citation score (1 year):** {int(p.predicted_citations or 0)}")
+        st.write(f"**Authors:** {', '.join(p.authors) if p.authors else 'Unknown'}")
         st.write(f"[arXiv link]({p.arxiv_url}) | [PDF link]({p.pdf_url})")
 
-        # Plain English summaries only in OpenAI mode
         if provider == "openai":
             paper_key = p.arxiv_id or p.title
             if paper_key in plain_summaries:
@@ -1358,45 +1317,37 @@ The predicted citation counts are heuristic impact signals, not precise forecast
                 plain_summaries[paper_key] = summary
                 st.session_state["plain_summaries"] = plain_summaries
 
-            st.markdown("Plain English summary:")
+            st.markdown("**Plain English summary:**")
             st.write(summary)
-        else:
-            st.caption(
-                "Plain English summaries are available when using the OpenAI provider with an API key. "
-                "Summaries are skipped in free hosted mode."
-            )
 
-        # Citation prediction explanations – only meaningful in OpenAI mode
-        if provider == "openai" and p.prediction_explanations:
-            st.write("Why this citation prediction:")
-            for ex in p.prediction_explanations[:3]:
-                st.write(f"- {ex}")
+            if p.prediction_explanations:
+                st.write("**Why this citation prediction (3 factors):**")
+                for ex in p.prediction_explanations[:3]:
+                    st.write(f"- {ex}")
+        else:
+            st.markdown("**Plain English summary:** only available in OpenAI option")
+            st.markdown("**Why this citation prediction (3 factors):** only available in OpenAI option")
 
         if p.focus_label:
-            st.write(f"Focus label: {p.focus_label}")
+            st.write(f"**Focus label:** {p.focus_label}")
         rel_str = f"{p.llm_relevance_score:.2f}" if p.llm_relevance_score is not None else "N/A"
-        st.write(f"LLM relevance score: {rel_str}")
+        st.write(f"**Relevance score:** {rel_str}")
         sim_str = f"{p.semantic_relevance:.3f}" if p.semantic_relevance is not None else "N/A"
-        st.write(f"Embedding similarity score: {sim_str}")
+        st.write(f"**Embedding similarity score:** {sim_str}")
 
-        # Why this paper matches your brief:
-        # OpenAI mode – keep the original label and explanation
-        if provider == "openai":
-            if p.semantic_reason:
-                st.write("Why this paper matches your brief:")
-                st.write(p.semantic_reason)
+        if p.semantic_reason:
+            st.write("**Why this paper matches your brief:**")
+            st.write(p.semantic_reason)
 
-        st.write("Abstract:")
+        st.write("**Abstract:**")
         st.write(p.abstract)
         st.markdown("---")
 
-    # 9. Export report
+    # 9. Markdown report for top N
     st.subheader("9. Export Top N Report")
 
-    provider_label = "OpenAI" if provider == "openai" else "Hosted open source model"
-
     report_lines = [
-        f"# Top {top_n_effective} Papers (Predicted Citations) - {datetime.now().isoformat()}",
+        f"# Top {top_n_effective} Papers (Citation Scores) - {datetime.now().isoformat()}",
         "## Research Brief",
         research_brief,
         "",
@@ -1405,29 +1356,30 @@ The predicted citation counts are heuristic impact signals, not precise forecast
         "",
         f"Mode: {mode}",
         f"Date range: {current_start} to {current_end}",
-        f"Provider: {provider_label}",
+        f"Provider: {'OpenAI' if provider == 'openai' else 'Free local heuristic'}",
         f"Chat model: {model_name}",
         f"Embedding model: {embedding_model_name}",
         "",
     ]
     for rank, p in enumerate(topN, start=1):
         report_lines.append(f"## #{rank}: {p.title}")
-        report_lines.append(f"- Predicted citations (1 year): {int(p.predicted_citations or 0)}")
+        report_lines.append(f"- Citation score (1 year): {int(p.predicted_citations or 0)}")
         report_lines.append(f"- Authors: {', '.join(p.authors) if p.authors else 'Unknown'}")
         report_lines.append(f"- arXiv: {p.arxiv_url}")
         report_lines.append(f"- PDF: {p.pdf_url}")
         if p.focus_label:
             report_lines.append(f"- Focus label: {p.focus_label}")
         if p.llm_relevance_score is not None:
-            report_lines.append(f"- LLM relevance score: {p.llm_relevance_score:.2f}")
+            report_lines.append(f"- Relevance score: {p.llm_relevance_score:.2f}")
         if p.semantic_relevance is not None:
             report_lines.append(f"- Embedding similarity: {p.semantic_relevance:.3f}")
-        if provider == "openai" and p.semantic_reason:
+        if p.semantic_reason:
             report_lines.append(f"- Relevance explanation: {p.semantic_reason}")
-        report_lines.append("- Prediction explanations:")
-        if provider == "openai" and p.prediction_explanations:
-            for ex in p.prediction_explanations[:3]:
-                report_lines.append(f"  - {ex}")
+        if provider == "openai":
+            report_lines.append("- Prediction explanations:")
+            if p.prediction_explanations:
+                for ex in p.prediction_explanations[:3]:
+                    report_lines.append(f"  - {ex}")
         report_lines.append("")
         report_lines.append("Abstract:")
         report_lines.append(p.abstract)
@@ -1460,13 +1412,13 @@ The predicted citation counts are heuristic impact signals, not precise forecast
     zip_bytes = st.session_state["zip_bytes"]
 
     st.success(f"Results saved in `{project_folder}`")
-    st.write("- current_papers_all.json")
-    st.write("- candidates_embedding_selected.json")
-    st.write("- candidates_with_classification.json")
-    st.write("- used_papers_for_prediction.json")
-    st.write("- selected_papers_for_prediction.json")
-    st.write("- selected_papers_with_predictions.json")
-    st.write("- topN_report.md")
+    st.write("- `current_papers_all.json`")
+    st.write("- `candidates_embedding_selected.json`")
+    st.write("- `candidates_with_classification.json`")
+    st.write("- `used_papers_for_prediction.json`")
+    st.write("- `selected_papers_for_prediction.json`")
+    st.write("- `selected_papers_with_predictions.json`")
+    st.write("- `topN_report.md`")
 
     st.download_button(
         "⬇️ Download all results as ZIP",
