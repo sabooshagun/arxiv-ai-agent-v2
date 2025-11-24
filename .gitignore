@@ -18,3 +18,4 @@ venv/
 *.egg-info/
 __pycache__/
 *.pyc
+arxiv_ai_digest_projects/

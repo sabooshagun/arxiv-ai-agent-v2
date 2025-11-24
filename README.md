@@ -1,76 +1,113 @@
 # 📘 Research Agent v2
 
-A lightweight research assistant that finds, ranks, and explains recent AI papers from arXiv.
+A lightweight research assistant that fetches, ranks, and explains recent AI papers from arXiv.
+Runs fully in Streamlit, supports OpenAI or a free local model, and produces ranked tables plus top-N highlight summaries.
 
-Now supports both OpenAI models and a free local LLM backend.
-
-This is the v2 Streamlit UI application.  
-The backend for the free model option lives in a separate repo.
+Now includes Human–Computer Interaction (cs.HC) in addition to cs.AI and cs.LG.
 
 ## 🚀 What's New in v2
 
-Research Agent v2 introduces a dual-mode architecture:
+### Two pipeline modes
 
-### 1. OpenAI Mode
+You can run the system using:
 
-For users with an OpenAI API key.  
-Provides the full experience:
+#### 1. OpenAI Mode
+
+Requires an OpenAI API key.
+Enables the full experience:
 
 - LLM-based relevance classification
-- Natural-language citation impact scoring
-- Plain English paper summaries
-- More informative and nuanced ranking signals
+- 1-year citation impact scoring using LLM judgment
+- Plain English summaries of top papers
+- Explanation factors for impact scores
+- Higher-accuracy and more nuanced ranking
 
-### 2. Free Local Model Mode
+#### 2. Free Local Model Mode (Default)
 
-For users who want a zero-cost option.
+Runs entirely locally on your machine.
 
-Powered by a separate backend server using:
+- No API key needed
+- Uses local embeddings (MiniLM-L6-v2)
+- Uses simple heuristic relevance + heuristic citation scoring
+- Skips LLM summaries
+- Still fetches and processes up to ~150 papers
+- Great for quick browsing or for users without API access
 
-- Phi-2 as the hosted LLM
-- MiniLM-L6-v2 as the embedding model
+Both modes share the same UI and the same pipeline.
+Only the classification and scoring steps differ.
 
-This mode:
+## 🧠 How It Works (Pipeline Overview)
 
-- Does not require any API key
-- Uses heuristic relevance scoring
-- Uses scaled citation impact scores instead of LLM reasoning about impact
-- Skips plain English summaries to keep the backend fast
-- Still fetches and ranks up to 150 arXiv papers
-
-Both modes run through the same pipeline, differing only in how relevance and citation impact scores are computed.
-
-## 🧠 How Research Agent Works
-
-Whether you use OpenAI or the free backend, the pipeline is:
+Whether using OpenAI or free mode, the pipeline is:
 
 ### 1. You provide
 
 - A short research brief
 - Optional "not looking for" text
-- A date range (3, 7, or 30 days)
+- A date window: Last 3 days, Last week, Last month
 
-### 2. The agent
+### 2. The agent fetches papers
 
-- Fetches recent cs.AI + cs.LG papers from arXiv
-- Computes embeddings
-- Selects up to 150 candidate papers
-- Classifies papers as primary, secondary, or off topic
-- Builds a citation scoring set (targeting ~20+ papers)
-- Assigns 1 year citation impact scores
-- Ranks papers by citation impact score
-- Highlights the top N papers
+It downloads recent papers from these categories:
 
-### 3. You receive
+- **cs.AI** – Artificial Intelligence
+- **cs.LG** – Machine Learning
+- **cs.HC** – Human–Computer Interaction
 
-- A full ranked table
-- A clean UI with metadata and links
-- A summary for top N papers (OpenAI mode only)
-- A ZIP archive with all artifacts (JSON + markdown report)
+### 3. Candidate selection
 
-## 💻 Running Locally (UI Only)
+- In **targeted mode**, it embeds the brief and abstracts then selects top-150 most similar
+- In **global mode**, it simply takes the most recent 150
 
-**Clone:**
+### 4. Relevance classification
+
+- **OpenAI mode**: LLM assigns primary, secondary, or off-topic
+- **Free mode**: heuristic based on embedding similarity
+
+### 5. Citation scoring set
+
+The agent:
+
+- Keeps all primary papers
+- Tops up with the strongest secondary papers until reaching ~20, when possible
+- In global mode, uses all candidates
+
+### 6. Citation impact scoring
+
+- **OpenAI mode**: asks the LLM for a 1-year citation impact score and 3 explanation factors
+- **Free mode**: derives a score from relevance and embedding similarity
+
+These are impact signals, not predictions.
+
+### 7. Ranking
+
+- Primary papers ranked first by citation score
+- Secondary papers follow
+- Off-topic (rare) come last
+
+### 8. Top-N highlighted papers
+
+Displays:
+
+- Metadata
+- Links to PDF and arXiv
+- Relevance reasoning
+- Citation impact score
+- Plain English summary (OpenAI mode only)
+
+### 9. Export
+
+A full Markdown report and all intermediate JSON files saved under:
+
+```
+~/arxiv_ai_digest_projects/project_<timestamp>
+```
+
+Downloadable as a ZIP from the UI.
+
+## 💻 Running Locally (Only a UI — No backend server required)
+
+**Clone the repo:**
 
 ```bash
 git clone https://github.com/nurtekinsavasai/arxiv-ai-agent-v2.git
@@ -90,108 +127,30 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-**Run the UI:**
+**Run the app:**
 
 ```bash
 streamlit run app.py
 ```
 
-Your browser will open:
+Your browser opens automatically.
 
-```
-http://localhost:8501
-```
+## 🔌 Choosing a Provider (Sidebar)
 
-## 🔌 Choosing a Model Provider
+### Option A — OpenAI
 
-### Option A: OpenAI
+Select "OpenAI" and enter:
 
-In the sidebar:
+- API key
+- Chat model (default: gpt-4.1-mini)
 
-1. Select **OpenAI**
-2. Enter your API key
-3. Run the pipeline
+Enables full classification, scoring, explanations, and summaries.
 
-OpenAI mode enables:
+### Option B — Free Local Model
 
-- Full LLM-based relevance classification
-- LLM-based citation impact scores with natural language explanations
-- Plain English summaries of the top N papers
+Select "Free local model".
 
-Your API key is never written to disk.
-
-### Option B: Free Local Model (Default)
-
-No key required.
-
-To use the free local LLM server:
-
-**Clone the backend repo:**
-
-```bash
-git clone https://github.com/nurtekinsavasai/arxiv-agent-backend.git
-```
-
-**Install backend dependencies:**
-
-```bash
-cd arxiv-agent-backend
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-**Start the backend:**
-
-```bash
-python server.py
-```
-
-You should see:
-
-```
-Uvicorn running on http://0.0.0.0:8000
-```
-
-Now run the UI and choose **Free local model (no API key)** in the sidebar.
-
-The UI will call:
-
-- `POST /chat`
-- `POST /embeddings`
-
-using:
-
-```python
-FREE_LLM_API_BASE = "http://localhost:8000"
-```
-
-(You can override this with an environment variable if deploying the backend elsewhere.)
-
-## 🧩 Backend Architecture (Free Model)
-
-The backend exposes three endpoints:
-
-### `POST /chat`
-
-- Uses Phi-2 via Transformers
-- Performs greedy decoding for speed
-- Max 200 new tokens
-
-### `POST /embeddings`
-
-- Uses MiniLM-L6-v2 (SentenceTransformers)
-- Returns batched embedding vectors
-
-### `GET /health`
-
-- Health check endpoint for the UI.
-
-The backend is CPU-only by default for stability across devices.
-
-## ⚠️ Limitations
-
-- Citation impact scores are heuristic ranking signals, not ground truth.
-- Free backend mode uses heuristics; OpenAI mode uses LLM judgment, which can still reflect academic and social biases.
-- Never use these scores alone for hiring, funding, promotion, or other high stakes decisions.
-- Always read the actual papers before drawing conclusions or making decisions.
+- No API key needed
+- Uses CPU-only MiniLM embeddings
+- Uses heuristic relevance + heuristic citation impact
+- Slower but fully free

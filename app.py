@@ -15,11 +15,12 @@ try:
     import streamlit as st
     import requests
     import feedparser
+    import pandas as pd
     from openai import OpenAI, NotFoundError, BadRequestError
 except ImportError as e:
     missing = str(e).split("'")[1]
     print(f"Missing package: {missing}")
-    print("Please run: pip install streamlit requests feedparser openai")
+    print("Please run: pip install streamlit requests feedparser openai pandas")
     raise
 
 # Optional local embedding model for free mode
@@ -57,7 +58,7 @@ class Paper:
     submitted_date: datetime
     pdf_url: str
     arxiv_url: str
-    predicted_citations: Optional[float] = None  # internal: holds the citation impact score
+    predicted_citations: Optional[float] = None
     prediction_explanations: Optional[List[str]] = None
     semantic_relevance: Optional[float] = None
     semantic_reason: Optional[str] = None
@@ -116,9 +117,9 @@ def fetch_arxiv_papers_by_date(
     max_retries: int = 3,
 ) -> List[Paper]:
     """
-    Fetch cs.AI + cs.LG papers from arXiv between start_date and end_date (inclusive).
+    Fetch cs.AI + cs.LG + cs.HC papers from arXiv between start_date and end_date (inclusive).
     """
-    query = "(cat:cs.AI OR cat:cs.LG)"
+    query = "(cat:cs.AI OR cat:cs.LG OR cat:cs.HC)"
     base_url = "https://export.arxiv.org/api/query"
 
     results: List[Paper] = []
@@ -138,7 +139,11 @@ def fetch_arxiv_papers_by_date(
             try:
                 response = requests.get(base_url, params=params, timeout=30)
             except requests.RequestException as e:
-                st.error(f"Network error while calling arXiv: {e}")
+                st.error(
+                    "Network error while calling arXiv. This might be a temporary issue on arxiv.org. "
+                    "Try running again in a few seconds.\n\n"
+                    f"Details: {e}"
+                )
                 return results
 
             if response.status_code == 429:
@@ -556,7 +561,7 @@ def heuristic_classify_papers_free(candidates: List[Paper]) -> List[Paper]:
 
 
 # =========================
-# Direct citation scoring helpers (OpenAI) + heuristic citations (free)
+# Direct citation impact scoring (OpenAI) + heuristic scores (free)
 # =========================
 
 def build_direct_prediction_prompt(target_papers: List[Paper]) -> str:
@@ -575,14 +580,11 @@ def build_direct_prediction_prompt(target_papers: List[Paper]) -> str:
     You are an expert in computer science and scientometrics.
 
     Below are recently published computer science papers.
-    For each paper, assign a 1 year citation impact score.
+    For each paper, estimate a 1-year citation impact score. Treat this as a relative impact measure
+    rather than a precise forecast. Higher scores indicate papers that are more likely to be widely
+    read and cited, but the ranking across papers matters more than the absolute counts.
 
-    This score should loosely correspond to how many citations the paper might
-    receive in one year, but it is primarily a relative impact signal:
-      - Higher scores indicate papers that are more likely to be widely read and cited.
-      - The ranking across papers matters more than the exact value.
-
-    Base your score on:
+    Base your impact scores on:
       - Topic popularity and trendiness
       - Novelty and depth of the abstract
       - Breadth of potential audience and applicability
@@ -624,7 +626,7 @@ def predict_citations_direct(
         parsed = safe_parse_json_array(llm_output)
         if parsed is None:
             st.error(
-                "Failed to parse LLM output as JSON for one citation scoring batch. "
+                "Failed to parse LLM output as JSON for one citation impact scoring batch. "
                 "Showing a raw snippet below for debugging."
             )
             st.code(llm_output[:1000])
@@ -638,7 +640,6 @@ def predict_citations_direct(
             if not p:
                 continue
             try:
-                # This field now represents a citation impact score, not a literal forecast
                 p.predicted_citations = float(item.get("predicted_citations", 0))
             except Exception:
                 p.predicted_citations = 0.0
@@ -668,7 +669,7 @@ def assign_heuristic_citations_free(papers: List[Paper]) -> List[Paper]:
             norm = (s - min_s) / (max_s - min_s)
         else:
             norm = 0.5
-        # Rough 10–50 range as a citation impact score
+        # Rough 10–50 range as a heuristic citation impact score
         p.predicted_citations = float(int(10 + norm * 40))
 
     return papers
@@ -704,6 +705,81 @@ def summarize_paper_plain_english(paper: Paper, llm_config: LLMConfig) -> str:
 
 
 # =========================
+# Pipeline description text
+# =========================
+
+PIPELINE_DESCRIPTION_MD = """
+#### Describe what you want
+
+You write a short research brief in natural language about the kind of work you care about, and optionally what you are not interested in. If you leave both fields empty, the agent switches to a global mode and just looks for the most impactful recent cs.AI, cs.LG, and cs.HC papers overall.
+
+#### The agent fetches recent arXiv papers
+
+It fetches up to about 5000 papers from arxiv.org in the Artificial Intelligence, Machine Learning, and Human–Computer Interaction categories (`cs.AI`, `cs.LG`, and `cs.HC`) for the date range you choose.
+
+#### The agent picks candidate papers
+
+- In **targeted mode**, the agent uses embeddings to measure how close each paper's title and abstract are to your brief in meaning and keeps the top 150 as candidates.  
+- In **global mode**, it simply takes the most recent 150 `cs.AI`, `cs.LG`, and `cs.HC` papers as candidates.
+
+#### The agent judges how relevant each paper is
+
+- In **OpenAI mode**, an LLM reads each candidate and labels it as primary, secondary, or off topic.  
+- In **free local mode**, a simple heuristic uses the embedding similarity to mark the most relevant papers as primary and the rest as secondary.
+
+#### The agent builds a citation impact set
+
+The agent builds a set of papers to send to the citation impact step:
+
+- It keeps all **primary** papers.  
+- If there are fewer than about 20, it tops up with the strongest **secondary** papers until it reaches roughly 20, when possible.  
+- In global mode, all candidates are used.
+
+#### The agent computes 1-year citation impact scores
+
+- In **OpenAI mode**, an LLM estimates a 1-year citation impact score for each paper and provides short explanations.  
+- In **free local mode**, the agent derives a citation impact score from the relevance signals and uses that to rank papers.
+
+These scores are heuristic impact signals and are best used for ranking within this batch, not as ground truth.
+
+#### The agent ranks, summarizes, and saves results
+
+The agent ranks papers, always showing **primary** papers first, then secondary ones. For the top N that you choose, it shows metadata, relevance signals, and links to arXiv and the PDF. In OpenAI mode it also adds plain English summaries. All artifacts and a markdown report are saved in a project folder under `~/arxiv_ai_digest_projects/project_<timestamp>`, and you can download everything as a ZIP.
+"""
+
+
+# =========================
+# Progress message helper
+# =========================
+
+def progress_message(provider: str, date_option: str) -> str:
+    """
+    Return a light, slightly funny progress hint based on provider and date range.
+    """
+    if date_option == "Last 3 Days":
+        tier = "light"
+    elif date_option == "Last Week":
+        tier = "medium"
+    else:
+        tier = "heavy"
+
+    if provider == "openai":
+        if tier == "light":
+            return "Request in progress. Go check a message or two, your papers are almost ready."
+        elif tier == "medium":
+            return "Request in progress. Go reply to a couple of messages and come back to fresh papers."
+        else:
+            return "Request in progress. Go check your messages and maybe top up your coffee while the model thinks."
+    else:
+        if tier == "light":
+            return "Request in progress. Go check a message while the local model does its thing."
+        elif tier == "medium":
+            return "Request in progress. Go clear a few notifications, the free local mode is crunching embeddings."
+        else:
+            return "Request in progress. Go check your messages and stretch your legs, this is the heaviest setting in free local mode."
+
+
+# =========================
 # Streamlit UI
 # =========================
 
@@ -726,45 +802,7 @@ def main():
             "https://youtu.be/PqJiYTvOP1M"
         )
 
-    st.markdown("""
-#### Describe what you want
-
-You write a short research brief in natural language about the kind of work you care about, and optionally what you are not interested in. If you leave both fields empty, the agent switches to a global mode and just looks for the most impactful recent cs.AI + cs.LG papers overall.
-
-#### The agent fetches recent arXiv papers
-
-It fetches up to about 5000 papers from arxiv.org in the Artificial Intelligence and Machine Learning categories (`cs.AI` and `cs.LG`) for the date range you choose.
-
-#### The agent picks candidate papers
-
-- In **targeted mode**, the agent uses embeddings to measure how close each paper's title and abstract are to your brief in meaning and keeps the top 150 as candidates.  
-- In **global mode**, it simply takes the most recent 150 `cs.AI` + `cs.LG` papers as candidates.
-
-#### The agent judges how relevant each paper is
-
-- In **OpenAI mode**, an LLM reads each candidate and labels it as primary, secondary, or off topic.  
-- In **free local mode**, a simple heuristic uses the embedding similarity to mark the most relevant papers as primary and the rest as secondary.
-
-#### The agent builds a citation scoring set
-
-The agent builds a set of papers to send to the citation scoring step:
-
-- It keeps all **primary** papers.  
-- If there are fewer than about 20, it tops up with the strongest **secondary** papers until it reaches roughly 20, when possible.  
-- In global mode, all candidates are used.
-
-#### The agent assigns 1 year citation impact scores
-
-- In **OpenAI mode**, an LLM reads each paper and assigns a 1 year citation impact score that loosely corresponds to how likely the paper is to be widely read and cited, and provides short explanations.  
-- In **free local mode**, the agent derives a citation impact score from the relevance signals and uses that to rank papers.
-
-These scores are heuristic impact signals and are best used for ranking within this batch, not as ground truth or as precise forecasts.
-
-#### The agent ranks, summarizes, and saves results
-
-The agent ranks papers, always showing **primary** papers first, then secondary ones. For the top N that you choose, it shows metadata, relevance signals, and links to arXiv and the PDF. In OpenAI mode it also adds plain English summaries. All artifacts and a markdown report are saved in a project folder under `~/arxiv_ai_digest_projects/project_<timestamp>`, and you can download everything as a ZIP.
-    """)
-
+    # Sidebar
     with st.sidebar:
         st.header("🧠 Research Brief")
 
@@ -781,7 +819,7 @@ The agent ranks papers, always showing **primary** papers first, then secondary 
             height=200,
             help="Describe your research interest in natural language. Focus on what the main contribution "
                  "of the papers should be. If you leave this and the next box empty, the agent will perform "
-                 "a global digest of recent cs.AI + cs.LG papers."
+                 "a global digest of recent cs.AI, cs.LG, and cs.HC papers."
         )
 
         not_looking_for = st.text_area(
@@ -836,7 +874,7 @@ The agent ranks papers, always showing **primary** papers first, then secondary 
                 "Custom",
             ]
             model_choice = st.selectbox(
-                "OpenAI Chat model (for classification & citation scoring)",
+                "OpenAI Chat model (for classification & citation impact scoring)",
                 openai_models,
                 index=0,
             )
@@ -857,12 +895,44 @@ The agent ranks papers, always showing **primary** papers first, then secondary 
             embedding_model_name = "sentence-transformers/all-MiniLM-L6-v2"
             st.caption(
                 f"Embeddings (local): `{embedding_model_name}`.\n"
-                "Classification and citation scoring use simple heuristics based on embedding similarity. "
-                "No API key or external calls."
+                "Classification and citation impact scoring use simple heuristics. No API key or external calls."
             )
 
         run_clicked = st.button("🚀 Run Pipeline")
 
+    # Collapse pipeline description after the first click
+    if run_clicked:
+        st.session_state["hide_pipeline_description"] = True
+
+    hide_desc = st.session_state.get("hide_pipeline_description", False)
+
+    if hide_desc:
+        with st.expander("Show full pipeline description", expanded=False):
+            st.markdown(PIPELINE_DESCRIPTION_MD)
+    else:
+        st.markdown(PIPELINE_DESCRIPTION_MD)
+
+    # Mode and query brief
+    brief_text = research_brief.strip()
+    not_text = not_looking_for.strip()
+
+    if not brief_text and not not_text:
+        mode = "global"
+        query_brief = (
+            "User wants to see the most impactful recent AI, ML, and HCI papers in cs.AI, cs.LG, and cs.HC, "
+            "without any additional topical filter."
+        )
+    elif not brief_text and not_text:
+        mode = "broad_not_only"
+        rb_prompt = (
+            "User is broadly interested in recent AI, ML, and HCI work in cs.AI, cs.LG, and cs.HC."
+        )
+        query_brief = build_query_brief(rb_prompt, not_looking_for)
+    else:
+        mode = "targeted"
+        query_brief = build_query_brief(research_brief, not_looking_for)
+
+    # Track params for rerun behavior
     params = {
         "research_brief": research_brief.strip(),
         "not_looking_for": not_looking_for.strip(),
@@ -875,6 +945,7 @@ The agent ranks papers, always showing **primary** papers first, then secondary 
     if "last_params" not in st.session_state:
         st.session_state["last_params"] = params.copy()
 
+    # Handle parameter changes
     if params != st.session_state["last_params"] and not run_clicked:
         for key in [
             "current_papers",
@@ -900,6 +971,7 @@ The agent ranks papers, always showing **primary** papers first, then secondary 
     if run_clicked:
         st.session_state["last_params"] = params.copy()
 
+    # Basic OpenAI validation
     if provider == "openai":
         if not api_key or not model_name:
             if "ranked_papers" not in st.session_state:
@@ -915,31 +987,14 @@ The agent ranks papers, always showing **primary** papers first, then secondary 
         api_base=api_base,
     )
 
-    brief_text = research_brief.strip()
-    not_text = not_looking_for.strip()
-
-    if not brief_text and not not_text:
-        mode = "global"
-        query_brief = (
-            "User wants to see the most impactful recent AI and ML papers in cs.AI and cs.LG, "
-            "without any additional topical filter."
-        )
-    elif not brief_text and not_text:
-        mode = "broad_not_only"
-        rb_prompt = "User is broadly interested in recent AI and ML work in cs.AI and cs.LG."
-        query_brief = build_query_brief(rb_prompt, not_looking_for)
-    else:
-        mode = "targeted"
-        query_brief = build_query_brief(research_brief, not_looking_for)
-
-    st.session_state["mode"] = mode
-
+    # Date range
     try:
         current_start, current_end = get_date_range(date_option)
     except ValueError as e:
         st.error(str(e))
         return
 
+    st.session_state["mode"] = mode
     st.session_state["current_start"] = current_start
     st.session_state["current_end"] = current_end
 
@@ -986,10 +1041,10 @@ The agent ranks papers, always showing **primary** papers first, then secondary 
     save_json(os.path.join(project_folder, "config.json"), config)
 
     # 2. Fetch current papers
-    st.subheader("2. Fetch Current Papers from arXiv (cs.AI + cs.LG)")
+    st.subheader("2. Fetch Current Papers from arXiv (cs.AI + cs.LG + cs.HC)")
 
     if run_clicked or "current_papers" not in st.session_state:
-        with st.spinner("Fetching cs.AI and cs.LG papers from arXiv by date window..."):
+        with st.spinner("Fetching cs.AI, cs.LG, and cs.HC papers from arXiv by date window..."):
             current_papers = fetch_arxiv_papers_by_date(
                 start_date=current_start,
                 end_date=current_end,
@@ -999,11 +1054,11 @@ The agent ranks papers, always showing **primary** papers first, then secondary 
         current_papers = st.session_state["current_papers"]
 
     if not current_papers:
-        st.warning("No cs.AI or cs.LG papers found for this date range (or arXiv stopped responding).")
+        st.warning("No cs.AI, cs.LG, or cs.HC papers found for this date range (or arXiv stopped responding).")
         return
 
     st.success(
-        f"Fetched {len(current_papers)} cs.AI + cs.LG papers in this date range "
+        f"Fetched {len(current_papers)} cs.AI, cs.LG, and cs.HC papers in this date range "
         "(before any candidate selection)."
     )
 
@@ -1026,7 +1081,9 @@ The agent ranks papers, always showing **primary** papers first, then secondary 
         else:
             candidates = st.session_state["candidates"]
 
-        st.success(f"{len(candidates)} most recent cs.AI + cs.LG papers selected as candidates (global mode).")
+        st.success(
+            f"{len(candidates)} most recent cs.AI, cs.LG, and cs.HC papers selected as candidates (global mode)."
+        )
     else:
         st.subheader("3. Embedding Based Candidate Selection")
         if run_clicked or "candidates" not in st.session_state:
@@ -1091,16 +1148,16 @@ The agent ranks papers, always showing **primary** papers first, then secondary 
         [asdict(p) for p in candidates],
     )
 
-    # 5. Build citation scoring set with minimum size
-    st.subheader("5. Automatically Selected Papers for Citation Scoring")
+    # 5. Build prediction set with minimum size
+    st.subheader("5. Automatically Selected Papers for Citation Impact Scoring")
 
     if mode == "global":
         primary_papers = [p for p in candidates]
         secondary_papers: List[Paper] = []
         used_papers = primary_papers.copy()
-        used_label = "Global mode: all candidate papers treated as PRIMARY and used for citation scoring."
+        used_label = "Global mode: all candidate papers treated as PRIMARY and used for citation impact scoring."
         st.success(
-            f"Global mode: using {len(used_papers)} most recent cs.AI + cs.LG papers for citation scoring."
+            f"Global mode: using {len(used_papers)} most recent cs.AI, cs.LG, and cs.HC papers for citation impact scoring."
         )
     else:
         primary_papers = [p for p in candidates if p.focus_label == "primary"]
@@ -1119,10 +1176,10 @@ The agent ranks papers, always showing **primary** papers first, then secondary 
         if primary_papers:
             if len(primary_papers) >= MIN_FOR_PREDICTION:
                 used_papers = primary_papers.copy()
-                used_label = "All PRIMARY papers (enough for citation scoring set)"
+                used_label = "All PRIMARY papers (enough for citation impact scoring)"
                 st.success(
                     f"{len(primary_papers)} papers classified as PRIMARY. "
-                    f"Using all of them for citation scoring (≥ {MIN_FOR_PREDICTION})."
+                    f"Using all of them for citation impact scoring (≥ {MIN_FOR_PREDICTION})."
                 )
             else:
                 used_papers = primary_papers.copy()
@@ -1135,8 +1192,7 @@ The agent ranks papers, always showing **primary** papers first, then secondary 
                         used_label = f"PRIMARY + top {len(topups)} SECONDARY to reach about {MIN_FOR_PREDICTION}"
                         st.info(
                             f"{len(primary_papers)} papers classified as PRIMARY. "
-                            f"Added {len(topups)} top SECONDARY papers to reach about {MIN_FOR_PREDICTION} "
-                            "for citation scoring."
+                            f"Added {len(topups)} top SECONDARY papers for citation impact scoring."   
                         )
                     else:
                         used_label = (
@@ -1152,7 +1208,7 @@ The agent ranks papers, always showing **primary** papers first, then secondary 
                     used_label = "All PRIMARY papers (no SECONDARY available)"
                     st.warning(
                         f"Only {len(primary_papers)} PRIMARY papers and no SECONDARY. "
-                        "Using all PRIMARY papers for scoring even though this is below the "
+                        "Using all PRIMARY papers for citation impact scoring even though this is below the "
                         f"target of {MIN_FOR_PREDICTION}."
                     )
         elif secondary_papers:
@@ -1183,11 +1239,11 @@ The agent ranks papers, always showing **primary** papers first, then secondary 
     )
 
     st.write(
-        "These are the papers that the pipeline will use for citation scoring. "
+        "These are the papers that the pipeline will use for citation impact scoring. "
         "Selection is automatic based on mode, embeddings (in targeted modes), and relevance classification."
     )
-    st.write(f"**Citation scoring set description:** {used_label}")
-    st.write(f"**Number of papers in citation scoring set:** {len(used_papers)}")
+    st.write(f"**Citation impact set description:** {used_label}")
+    st.write(f"**Number of papers in citation impact set:** {len(used_papers)}")
 
     for p in used_papers:
         with st.expander(p.title, expanded=False):
@@ -1199,10 +1255,10 @@ The agent ranks papers, always showing **primary** papers first, then secondary 
             rel_str = f"{p.llm_relevance_score:.2f}" if p.llm_relevance_score is not None else "N/A"
             st.write(f"**Relevance score:** {rel_str}")
             sim_str = f"{p.semantic_relevance:.3f}" if p.semantic_relevance is not None else "N/A"
-            st.write(f"**Embedding similarity score:** {sim_str}")
             if p.semantic_reason:
                 st.write("**Why this paper is (or is not) relevant to your brief:**")
                 st.write(p.semantic_reason)
+            st.write(f"**Embedding similarity score:** {sim_str}")
             st.write("**Abstract:**")
             st.write(p.abstract)
 
@@ -1212,29 +1268,29 @@ The agent ranks papers, always showing **primary** papers first, then secondary 
         [asdict(p) for p in selected_papers],
     )
 
-    # 6. Citation scoring
-    st.subheader("6. Citation Scoring")
+    # 6. Citation impact scoring
+    st.subheader("6. Citation Impact Scoring")
 
     if provider == "openai":
         st.markdown("""
 **How this step works (OpenAI mode)**
 
-For each selected paper, the agent sends the title, authors, and abstract to an OpenAI model and asks it to assign a 1 year citation impact score. The model bases this score on signals such as how trendy the topic is, how novel and substantial the abstract sounds, how broad the potential audience is, and whether the work appears to come from strong labs or well known authors.
+For each selected paper, the agent sends the title, authors, and abstract to an OpenAI model and asks it to assign a 1-year citation impact score. The model bases this score on signals such as how trendy the topic is, how novel and substantial the abstract sounds, how broad the potential audience is, and whether the work appears to come from strong labs or well known authors.
 
-These citation impact scores are heuristic signals and are best used for ranking and prioritizing within this batch of papers, not as ground truth or precise forecasts. They may reflect existing academic biases.
+These citation impact scores are heuristic and are best used for ranking and prioritization within this batch of papers, not as ground truth. They may reflect existing academic biases.
         """)
     else:
         st.markdown("""
 **How this step works (free local mode)**
 
-In free local mode, the agent does not call any external LLM. Instead, it combines the embedding based similarity and relevance scores into a single numeric citation impact score and uses that score as a proxy for 1 year citation influence. The absolute numbers are less important than the ranking.
+In free local mode, the agent does not call any external LLM. Instead, it combines the embedding based similarity and relevance scores into a single numeric citation impact score and uses that score as a proxy for how influential the paper might be relative to others in this batch. The absolute numbers are less important than the relative ranking.
 
 These scores are heuristic and should be used as a guide for exploration rather than as formal evaluation metrics.
         """)
 
     if run_clicked or "ranked_papers" not in st.session_state:
         if provider == "openai":
-            with st.spinner("Calling OpenAI to assign citation impact scores for selected papers..."):
+            with st.spinner("Calling OpenAI to compute citation impact scores for selected papers..."):
                 papers_with_pred = predict_citations_direct(
                     target_papers=selected_papers,
                     llm_config=llm_config,
@@ -1247,7 +1303,7 @@ These scores are heuristic and should be used as a guide for exploration rather 
             p for p in papers_with_pred if p.predicted_citations is not None
         ]
         if not papers_with_pred:
-            st.error("Citation scoring did not produce any scores.")
+            st.error("Citation impact scoring did not produce any scores.")
             return
 
         primary_pred = [p for p in papers_with_pred if p.focus_label == "primary"]
@@ -1269,6 +1325,7 @@ These scores are heuristic and should be used as a guide for exploration rather 
 
         ranked_papers = primary_pred_sorted + secondary_pred_sorted + others_pred_sorted
         st.session_state["ranked_papers"] = ranked_papers
+        st.session_state["has_run_once"] = True
     else:
         ranked_papers = st.session_state["ranked_papers"]
 
@@ -1281,21 +1338,43 @@ These scores are heuristic and should be used as a guide for exploration rather 
     st.subheader("7. All Selected Papers (Ranked by Citation Impact Score)")
 
     st.caption(
-        "Primary papers appear first, ranked by citation impact score, followed by secondary papers. "
-        "OpenAI mode uses an LLM to assign scores; free mode uses heuristic scores from relevance signals."
+        "Primary papers appear first, ranked by citation impact score, followed by secondary papers."
     )
 
-    header = "| Rank | Citation impact score (1y) | Focus label | Relevance score | Embedding similarity | Title |\n"
-    sep = "|---:|---:|---|---:|---:|---|\n"
-    rows_md = []
+    table_rows = []
     for rank, p in enumerate(ranked_papers, start=1):
         pred = int(p.predicted_citations or 0)
-        focus = p.focus_label or ""
-        llm_rel = f"{(p.llm_relevance_score or 0.0):.2f}"
-        emb_rel = f"{(p.semantic_relevance or 0.0):.3f}"
-        title = p.title.replace("|", "\\|")
-        rows_md.append(f"| {rank} | {pred} | {focus} | {llm_rel} | {emb_rel} | {title} |")
-    st.markdown(header + sep + "\n".join(rows_md))
+        focus = p.focus_label or "unknown"
+        if focus == "primary":
+            focus_display = "🟢 primary"
+        elif focus == "secondary":
+            focus_display = "🟡 secondary"
+        elif focus == "off-topic":
+            focus_display = "⚪ off-topic"
+        else:
+            focus_display = focus
+        llm_rel = float(p.llm_relevance_score or 0.0)
+        emb_rel = float(p.semantic_relevance or 0.0)
+        table_rows.append(
+            {
+                "Rank": rank,
+                "Citation impact score (1y)": pred,
+                "Focus": focus_display,
+                "Relevance score": round(llm_rel, 2),
+                "Embedding similarity": round(emb_rel, 3),
+                "Title": p.title,
+                "arXiv": p.arxiv_url,
+            }
+        )
+
+    df = pd.DataFrame(table_rows)
+
+    if not df.empty:
+        st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True,
+        )
 
     # 8. Top N highlighted
     top_n_effective = min(top_n, len(ranked_papers))
@@ -1383,7 +1462,7 @@ These scores are heuristic and should be used as a guide for exploration rather 
         if p.semantic_reason:
             report_lines.append(f"- Relevance explanation: {p.semantic_reason}")
         if provider == "openai":
-            report_lines.append("- Citation score explanations:")
+            report_lines.append("- Citation impact explanations:")
             if p.prediction_explanations:
                 for ex in p.prediction_explanations[:3]:
                     report_lines.append(f"  - {ex}")
