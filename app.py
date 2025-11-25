@@ -213,8 +213,7 @@ def fetch_arxiv_papers_by_date(
             results.append(paper)
             batch_added += 1
 
-        if batch_added == 0:
-            break
+       
 
         start_index += batch_size
         time.sleep(1.0)
@@ -799,7 +798,7 @@ def main():
     with top_col2:
         st.link_button(
             "▶ Watch a short demo",
-            "https://youtu.be/PqJiYTvOP1M"
+            "https://youtu.be/4CvYLwlhXac"
         )
 
     # Sidebar

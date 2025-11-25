@@ -5,6 +5,8 @@ Runs fully in Streamlit, supports OpenAI or a free local model, and produces ran
 
 Now includes Human–Computer Interaction (cs.HC) in addition to cs.AI and cs.LG.
 
+🎥 Watch the short demo: https://youtu.be/4CvYLwlhXac
+
 ## 🚀 What's New in v2
 
 ### Two pipeline modes
