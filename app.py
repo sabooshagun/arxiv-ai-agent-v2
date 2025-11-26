@@ -1384,10 +1384,19 @@ These scores are heuristic and should be used as a guide for exploration rather 
 
     if not df.empty:
         st.dataframe(
-            df,
-            use_container_width=True,
-            hide_index=True,
-        )
+        df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "arXiv": st.column_config.LinkColumn(
+                label="arXiv",
+                help="Open arXiv page",
+                validate="^https?://.*",
+                max_chars=100,
+                display_text="arXiv link"
+            )
+        }
+    )
 
     # 8. Top N highlighted
     top_n_effective = min(top_n, len(ranked_papers))
