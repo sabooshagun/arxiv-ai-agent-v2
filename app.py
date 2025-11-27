@@ -150,12 +150,7 @@ def filter_papers_by_not_terms(papers: List[Paper], not_text: str) -> (List[Pape
 
     return filtered, removed
 
-def filter_papers_by_venue(
-    papers: List[Paper],
-    filter_type: str,
-    conference_choice: Optional[str]
-) -> List[Paper]:
-
+def filter_papers_by_venue(papers: List[Paper], filter_type: str, selected_venue: Optional[str]):
     if filter_type == "None":
         return papers
 
@@ -163,22 +158,18 @@ def filter_papers_by_venue(
     for p in papers:
         venue = (p.venue or "").lower()
 
-        # Generic conference
-        if filter_type == "Conference":
-            if any(conf.lower() == venue for conf in CONFERENCE_KEYWORDS):
+        # Conference → match selected conference
+        if filter_type == "Conference" and selected_venue:
+            if venue == selected_venue.lower():
                 results.append(p)
 
-        # Generic journal
-        elif filter_type == "Journal":
-            if any(j.lower() == venue for j in JOURNAL_KEYWORDS):
-                results.append(p)
-
-        # Specific conference like EMNLP
-        elif filter_type == "Specific Conference" and conference_choice:
-            if venue == conference_choice.lower():
+        # Journal → match selected journal
+        elif filter_type == "Journal" and selected_venue:
+            if venue == selected_venue.lower():
                 results.append(p)
 
     return results
+
 
 # =========================
 # Venue extraction helpers
@@ -1012,16 +1003,24 @@ def main():
 
         venue_filter_type = st.selectbox(
             "Filter by venue (optional)",
-            ["None", "Conference", "Journal", "Specific Conference"],
+            ["None", "Conference", "Journal"],
             index=0
         )
 
-        conference_choice = None
-        if venue_filter_type == "Specific Conference":
-            conference_choice = st.selectbox(
+        selected_venue = None
+
+        if venue_filter_type == "Conference":
+            selected_venue = st.selectbox(
                 "Choose conference",
                 sorted(list(CONFERENCE_KEYWORDS))
             )
+
+        elif venue_filter_type == "Journal":
+            selected_venue = st.selectbox(
+                "Choose journal",
+                sorted(list(JOURNAL_KEYWORDS))
+            )
+
 
 
         date_option = st.selectbox("Date Range", ["Last 3 Days", "Last Week", "Last Month"])
@@ -1174,8 +1173,8 @@ def main():
         "top_n": top_n,
         "model_name": model_name,
         "provider": provider,
-        "venue_filter_type": venue_filter_type,       # NEW
-        "conference_choice": conference_choice,       # NEW
+        "venue_filter_type": venue_filter_type,
+        "selected_venue": selected_venue,
     }
 
     if "last_params" not in st.session_state:
@@ -1316,21 +1315,22 @@ def main():
            )
     # Venue filter (new)
     venue_filter_type = params["venue_filter_type"]
-    conference_choice = params["conference_choice"]
+    selected_venue = params["selected_venue"]
 
     before_count = len(current_papers)
     current_papers = filter_papers_by_venue(
     current_papers,
     filter_type=venue_filter_type,
-    conference_choice=conference_choice,
+    selected_venue=selected_venue,
 )
     after_count = len(current_papers)
 
     if venue_filter_type != "None":
         st.info(
-            f"Venue filter `{venue_filter_type}` applied. "
+            f"Venue filter `{venue_filter_type}` → `{selected_venue}` applied. "
             f"Remaining papers: {after_count} (filtered out {before_count - after_count})"
-        )
+    )
+
 
     # Save filtered version into state
     st.session_state["current_papers"] = current_papers
