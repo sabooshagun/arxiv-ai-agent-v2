@@ -1,5 +1,3 @@
-# app.py
-
 import os
 import json
 import time
@@ -185,9 +183,6 @@ def filter_papers_by_venue(
     return filtered
 
 
-
-
-
 # =========================
 # Venue extraction helpers
 # =========================
@@ -354,7 +349,7 @@ def fetch_arxiv_papers_by_date(
             results.append(paper)
 
         start_index += batch_size
-        time.sleep(1.0)
+        time.sleep(3.0)
 
     if len(results) >= max_batches * batch_size:
         st.warning(
@@ -1341,52 +1336,23 @@ def main():
 
     # Apply NOT filter provider-agnostically
     # NOT filter
-    # if not_text:
-    #     current_papers, removed_count = filter_papers_by_not_terms(current_papers, not_text)
-    #     st.info(f"Excluded {removed_count} papers whose title or abstract contained NOT terms.")
-    # ONLY apply NOT filter here — venue filter will be applied LATER
     if not_text:
         current_papers, removed_count = filter_papers_by_not_terms(current_papers, not_text)
         st.info(f"Excluded {removed_count} papers whose title or abstract contained NOT terms.")
 
-# DO NOT apply venue filter here.
-# Save the venue settings for later use after embeddings.
-        st.session_state["venue_filter_type"] = venue_filter_type
-        st.session_state["selected_category"] = selected_category
-        st.session_state["selected_venues"] = selected_venues
+    # DO NOT apply venue filter here.
+    # Save the venue settings for later use after embeddings.
+    st.session_state["venue_filter_type"] = venue_filter_type
+    st.session_state["selected_category"] = selected_category
+    st.session_state["selected_venues"] = selected_venues
 
-
-
-
-    venue_filter_type = params["venue_filter_type"]
-    selected_category = params.get("selected_category")
-    selected_venues = params.get("selected_venues", [])
-
-    before_count = len(current_papers)
-    current_papers = filter_papers_by_venue(
-        current_papers,
-        venue_filter_type,
-        selected_category,
-        selected_venues
-    )
-    after_count = len(current_papers)
-
-    if venue_filter_type != "None":
-        st.info(
-            f"Venue filter `{venue_filter_type}` applied → "
-            f"{selected_category or ''}: {', '.join(selected_venues) if selected_venues else 'None'}\n"
-            f"Remaining: {after_count} (Filtered out {before_count - after_count})"
-        )
-
-
+    # 🔴 DELETED EARLY FILTER: Logic moved to AFTER embeddings to prevent blinding the model.
 
     st.session_state["current_papers"] = current_papers
 
     if not current_papers:
         st.warning("All papers were filtered out. Relax filters or pick another date range.")
         return
-
-
 
     save_json(
         os.path.join(project_folder, "current_papers_all.json"),
@@ -1430,7 +1396,8 @@ def main():
             candidates = st.session_state["candidates"]
 
         st.success(f"{len(candidates)} top candidates selected by embedding similarity for further filtering.")
-        # Apply venue filtering AFTER embeddings ✨
+
+    # Apply venue filtering AFTER embeddings ✨
     venue_filter_type = st.session_state.get("venue_filter_type", "None")
     selected_category = st.session_state.get("selected_category", None)
     selected_venues = st.session_state.get("selected_venues", [])
@@ -1455,8 +1422,6 @@ def main():
             f"Venue filter `{venue_filter_type}` applied{name_string}. "
             f"Remaining: {after_v} (Filtered out {before_v - after_v})"
         )
-
-
 
     save_json(
         os.path.join(project_folder, "candidates_embedding_selected.json"),
@@ -1764,7 +1729,7 @@ These scores are heuristic and should be used as a guide for exploration rather 
         st.markdown(f"### #{rank}: {p.title}")
         st.write(f"**Citation impact score (1 year):** {int(p.predicted_citations or 0)}")
         st.write(f"**Authors:** {', '.join(p.authors) if p.authors else 'Unknown'}")
-        st.markdown(f"**Venue:**{p.venue or 'N/A'}")
+        st.markdown(f"**Venue:** {p.venue or 'N/A'}")
         st.write(f"[arXiv link]({p.arxiv_url}) | [PDF link]({p.pdf_url})")
 
         if provider in ("openai", "gemini"):
