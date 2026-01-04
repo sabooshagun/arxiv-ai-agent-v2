@@ -205,6 +205,21 @@ JOURNAL_KEYWORDS = [
 
 NEGATIVE_VENUE_SIGNALS = ["submitted to", "under review", "preprint"]
 
+ARXIV_CATEGORIES: Dict[str, List[str]] = {
+    # Keep it practical; you can extend anytime
+    "Computer Science": [
+        "cs.AI", "cs.LG", "cs.HC", "cs.CL", "cs.CV", "cs.RO", "cs.IR", "cs.NE", "cs.SE",
+        "cs.CR", "cs.DS", "cs.DB", "cs.SI", "cs.MM", "cs.IT", "cs.PF", "cs.MA",
+    ],
+    "Statistics": ["stat.ML", "stat.AP", "stat.CO", "stat.TH"],
+    "Mathematics": ["math.OC", "math.ST", "math.IT", "math.PR", "math.NA"],
+    "Physics": ["physics.comp-ph", "physics.data-an", "physics.soc-ph", "physics.optics"],
+    "Quantitative Biology": ["q-bio.QM", "q-bio.NC", "q-bio.BM"],
+    "Quantitative Finance": ["q-fin.MF", "q-fin.ST", "q-fin.CP", "q-fin.TR"],
+    "Electrical Engineering and Systems Science": ["eess.IV", "eess.SP", "eess.SY", "eess.AS"],
+    "Economics": ["econ.EM", "econ.TH"],
+}
+
 def extract_venue(comment: str) -> Optional[str]:
     if not comment:
         return None
@@ -217,6 +232,28 @@ def extract_venue(comment: str) -> Optional[str]:
             return venue
     return None
 
+def build_arxiv_category_query(
+    main_category: str,
+    subcategories: List[str],
+) -> str:
+    """
+    Returns arXiv API query fragment like:
+      (cat:cs.AI OR cat:cs.LG OR cat:stat.ML)
+    If subcategories empty, falls back to all subcats in main_category.
+    If main_category == "All", uses all subcategories across all mains.
+    """
+    if main_category == "All":
+        cats = sorted({c for subs in ARXIV_CATEGORIES.values() for c in subs})
+    else:
+        cats = subcategories if subcategories else ARXIV_CATEGORIES.get(main_category, [])
+
+    # Safety fallback (so your app never crashes)
+    if not cats:
+        cats = ["cs.AI", "cs.LG", "cs.HC"]
+
+    return "(" + " OR ".join([f"cat:{c}" for c in cats]) + ")"
+
+
 
 # =========================
 # Robust arXiv fetching
@@ -225,11 +262,12 @@ def extract_venue(comment: str) -> Optional[str]:
 def fetch_arxiv_papers_by_date(
     start_date: date,
     end_date: date,
+    arxiv_query: Optional[str] = None,
     batch_size: int = 50,
     max_batches: int = 100,
     max_retries: int = 3,
 ) -> List[Paper]:
-    query = "(cat:cs.AI OR cat:cs.LG OR cat:cs.HC)"
+    query = arxiv_query or "(cat:cs.AI OR cat:cs.LG OR cat:cs.HC)"
     base_url = "https://export.arxiv.org/api/query"
 
     results: List[Paper] = []
@@ -762,12 +800,11 @@ You write a short research brief in natural language about the kind of work you 
 
 #### 2. The agent fetches recent arXiv papers
 
-It fetches up to about 5000 papers from arxiv.org in the Artificial Intelligence, Machine Learning, and Human–Computer Interaction categories (`cs.AI`, `cs.LG`, and `cs.HC`) for the date range you choose. It does this carefully, respecting arXiv's API rate limits.
-
+It fetches up to about 5000 papers from arxiv.org for the date range you choose, using your selected arXiv category filters—either all categories, or a specific main category (like Computer Science, Statistics, Physics) with one or more subcategories (like cs.AI, stat.ML, etc.). It does this carefully, respecting arXiv’s API rate limits.
 #### 3. The agent picks candidate papers
 
 - In **targeted mode**, the agent uses embeddings to measure how close each paper's title and abstract are to your brief in meaning and keeps the top 150 as candidates.
-- In **global mode**, it simply takes the most recent 150 `cs.AI`, `cs.LG`, and `cs.HC` papers as candidates.
+- In **global mode**, it simply takes the most recent 150  papers as candidates.
 
 #### The agent filters by venue (Optional)
 
@@ -874,6 +911,31 @@ def main():
                 f"Select {selected_category.lower()}(s):",
                 options=options
             )
+
+        #----Category selection UI-----
+        st.markdown("### 🧩 arXiv Category")
+
+        main_cat = st.selectbox(
+            "Main category",
+            ["All"] + list(ARXIV_CATEGORIES.keys()),
+            index=1  # default to "Computer Science" (change if you want)
+        )
+
+        if main_cat == "All":
+            # optional: allow multiselect of mains, but simplest is "All categories"
+            subcats = []
+            st.caption("Using all available categories.")
+        else:
+            subcats = st.multiselect(
+                "Subcategory (choose one or more)",
+                options=ARXIV_CATEGORIES[main_cat],
+                default=["cs.AI", "cs.LG", "cs.HC"] if main_cat == "Computer Science" else [],
+                help="If you choose none, we’ll use ALL subcategories from the selected main category."
+            )
+        # Build query string to pass into fetch
+        arxiv_query = build_arxiv_category_query(main_cat, subcats)
+
+
 
         date_option = st.selectbox("Date Range", ["Last 3 Days", "Last Week", "Last Month"])
 
@@ -1178,24 +1240,26 @@ def main():
     save_json(os.path.join(project_folder, "config.json"), config)
 
     # 2. Fetch current papers
-    st.subheader("2. Fetch Current Papers from arXiv (cs.AI + cs.LG + cs.HC)")
+    st.subheader("2. Fetch Current Papers from arXiv according to your selected Category and Subcategory")
 
     if run_clicked or "current_papers" not in st.session_state:
-        with st.spinner("Fetching cs.AI, cs.LG, and cs.HC papers from arXiv by date window..."):
+        with st.spinner("Fetching current papers from arXiv by date window..."):
             current_papers = fetch_arxiv_papers_by_date(
                 start_date=current_start,
                 end_date=current_end,
+                arxiv_query=arxiv_query,
+
             )
         st.session_state["current_papers"] = current_papers
     else:
         current_papers = st.session_state["current_papers"]
 
     if not current_papers:
-        st.warning("No cs.AI, cs.LG, or cs.HC papers found for this date range (or arXiv stopped responding).")
+        st.warning("No papers found for this date range (or arXiv stopped responding).")
         return
 
     st.success(
-        f"Fetched {len(current_papers)} cs.AI, cs.LG, and cs.HC papers in this date range "
+        f"Fetched {len(current_papers)}  papers in this date range and Category/Subcategory Selected "
         "(before any candidate selection)."
     )
 
@@ -1583,7 +1647,7 @@ These scores are heuristic and should be used as a guide for exploration rather 
     if not df.empty:
         st.dataframe(
             df,
-            use_container_width=True,
+            width='stretch',
             hide_index=True,
             column_config={
                 "arXiv": st.column_config.LinkColumn(
